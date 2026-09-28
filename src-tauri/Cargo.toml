@@ -1,0 +1,22 @@
+[package]
+name = "persona"
+version = "1.0.0"
+description = "Persona - Личный блокнот подготовки к ЕГЭ"
+authors = ["NRT"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2.1", features = [] }
+
+[dependencies]
+tauri = { version = "2.1", features = [] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+panic = "abort"
+strip = true

@@ -1,0 +1,6 @@
+{
+  "name": "Persona",
+  "description": "Минималистичный локальный блокнот для ручной записи подготовки к ЕГЭ: задания по предметам и календарь занятий.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

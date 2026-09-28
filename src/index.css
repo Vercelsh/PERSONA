@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --bg-color: #0a0a0a;
+  --card-bg: #090909;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: #0a0a0a;
+  color: #ededed;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  contain: paint layout;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+body {
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* Disable text selection on all static / boilerplate UI elements */
+*, *::before, *::after {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Allow text selection ONLY in real text input controls or editable areas */
+input,
+textarea,
+[contenteditable="true"],
+.allow-select {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Fullscreen support: prevent letterboxing, black borders and white outlines */
+:fullscreen,
+::backdrop,
+:-webkit-full-screen {
+  background-color: #0a0a0a !important;
+  border: none !important;
+  outline: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+}
+
+*:focus {
+  outline: none;
+}
+
+/* Monospace font */
+code, kbd, samp, pre, .font-mono {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* Subtle ambient background glow */
+.persona-bg-ambient {
+  background-image: 
+    radial-gradient(circle at 50% -10%, rgba(255, 255, 255, 0.04) 0%, transparent 50%),
+    radial-gradient(circle at 100% 40%, rgba(255, 255, 255, 0.015) 0%, transparent 40%);
+}
+
+/* Hide all scrollbars completely (wheel / trackpad scrolling remains fully active) */
+* {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+
+::-webkit-scrollbar {
+  display: none !important;
+  width: 0px !important;
+  height: 0px !important;
+  background: transparent !important;
+}
