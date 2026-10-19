@@ -1,62 +1,99 @@
-import { Subject, TaskItem, CalendarEntry, StoredFile } from '../types';
+import { Subject, TaskItem, CalendarEntry, StoredFile, BoardState } from '../types';
 
 const DB_NAME = 'persona_notebook_db';
-const DB_VERSION = 3; // Bump version so existing browser test sessions auto-reset cleanly
+const DB_VERSION = 5; // Bump version to 5 for compatibility with existing DB version
 
 let dbPromise: Promise<IDBDatabase> | null = null;
+
+function setupStores(db: IDBDatabase) {
+  if (!db.objectStoreNames.contains('subjects')) {
+    const subjectStore = db.createObjectStore('subjects', { keyPath: 'id' });
+    subjectStore.createIndex('order', 'order', { unique: false });
+  }
+
+  if (!db.objectStoreNames.contains('tasks')) {
+    const taskStore = db.createObjectStore('tasks', { keyPath: 'id' });
+    taskStore.createIndex('subjectId', 'subjectId', { unique: false });
+    taskStore.createIndex('taskNumber', 'taskNumber', { unique: false });
+  }
+
+  if (!db.objectStoreNames.contains('calendar_entries')) {
+    const calendarStore = db.createObjectStore('calendar_entries', { keyPath: 'id' });
+    calendarStore.createIndex('date', 'date', { unique: false });
+  }
+
+  // Dedicated Blob/binary store for attachments (saves memory, prevents huge Base64 strings)
+  if (!db.objectStoreNames.contains('file_attachments')) {
+    db.createObjectStore('file_attachments', { keyPath: 'id' });
+  }
+
+  // Dedicated Board store for task whiteboards (keyed by taskId)
+  if (!db.objectStoreNames.contains('board_states')) {
+    const boardStore = db.createObjectStore('board_states', { keyPath: 'taskId' });
+    boardStore.createIndex('subjectId', 'subjectId', { unique: false });
+  }
+}
 
 export function getDB(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
 
   dbPromise = new Promise((resolve, reject) => {
-    try {
-      const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const tryOpen = (version?: number) => {
+      try {
+        const request = version !== undefined 
+          ? indexedDB.open(DB_NAME, version) 
+          : indexedDB.open(DB_NAME);
 
-      request.onupgradeneeded = (event) => {
-        const db = (event.target as IDBOpenDBRequest).result;
+        request.onupgradeneeded = (event) => {
+          const db = (event.target as IDBOpenDBRequest).result;
+          setupStores(db);
+        };
 
-        // If migrating from previous test version, clear all stores cleanly
-        if (event.oldVersion > 0 && event.oldVersion < 3) {
-          if (db.objectStoreNames.contains('subjects')) db.deleteObjectStore('subjects');
-          if (db.objectStoreNames.contains('tasks')) db.deleteObjectStore('tasks');
-          if (db.objectStoreNames.contains('calendar_entries')) db.deleteObjectStore('calendar_entries');
-          if (db.objectStoreNames.contains('file_attachments')) db.deleteObjectStore('file_attachments');
-        }
+        request.onsuccess = () => {
+          const db = request.result;
 
-        if (!db.objectStoreNames.contains('subjects')) {
-          const subjectStore = db.createObjectStore('subjects', { keyPath: 'id' });
-          subjectStore.createIndex('order', 'order', { unique: false });
-        }
+          // Check if all needed stores exist in case DB was created or opened at different version
+          const neededStores = ['subjects', 'tasks', 'calendar_entries', 'file_attachments', 'board_states'];
+          const missingStores = neededStores.some((store) => !db.objectStoreNames.contains(store));
 
-        if (!db.objectStoreNames.contains('tasks')) {
-          const taskStore = db.createObjectStore('tasks', { keyPath: 'id' });
-          taskStore.createIndex('subjectId', 'subjectId', { unique: false });
-          taskStore.createIndex('taskNumber', 'taskNumber', { unique: false });
-        }
+          if (missingStores) {
+            const nextVersion = db.version + 1;
+            db.close();
+            const upgradeReq = indexedDB.open(DB_NAME, nextVersion);
+            upgradeReq.onupgradeneeded = (ev) => {
+              const upgradeDb = (ev.target as IDBOpenDBRequest).result;
+              setupStores(upgradeDb);
+            };
+            upgradeReq.onsuccess = () => resolve(upgradeReq.result);
+            upgradeReq.onerror = () => {
+              dbPromise = null;
+              reject(upgradeReq.error || new Error('Не удалось обновить схему локальной базы данных IndexedDB'));
+            };
+            return;
+          }
 
-        if (!db.objectStoreNames.contains('calendar_entries')) {
-          const calendarStore = db.createObjectStore('calendar_entries', { keyPath: 'id' });
-          calendarStore.createIndex('date', 'date', { unique: false });
-        }
+          resolve(db);
+        };
 
-        // Dedicated Blob/binary store for attachments (saves memory, prevents huge Base64 strings)
-        if (!db.objectStoreNames.contains('file_attachments')) {
-          db.createObjectStore('file_attachments', { keyPath: 'id' });
-        }
-      };
+        request.onerror = () => {
+          // If a VersionError occurs (the browser's existing database has a higher version),
+          // fallback to opening without a specified version to open at the current version.
+          if (request.error?.name === 'VersionError' && version !== undefined) {
+            console.warn(`IndexedDB requested version (${version}) is lower than existing version. Opening at existing version...`);
+            tryOpen(undefined);
+            return;
+          }
 
-      request.onsuccess = () => {
-        resolve(request.result);
-      };
-
-      request.onerror = () => {
+          dbPromise = null;
+          reject(request.error || new Error('Не удалось открыть локальную базу данных IndexedDB'));
+        };
+      } catch (e) {
         dbPromise = null;
-        reject(request.error || new Error('Не удалось открыть локальную базу данных IndexedDB'));
-      };
-    } catch (e) {
-      dbPromise = null;
-      reject(e);
-    }
+        reject(e);
+      }
+    };
+
+    tryOpen(DB_VERSION);
   });
 
   return dbPromise;
@@ -105,13 +142,14 @@ export async function deleteSubject(subjectId: string): Promise<void> {
   return new Promise((resolve, reject) => {
     try {
       const transaction = db.transaction(
-        ['subjects', 'tasks', 'calendar_entries', 'file_attachments'],
+        ['subjects', 'tasks', 'calendar_entries', 'file_attachments', 'board_states'],
         'readwrite'
       );
       const subjectStore = transaction.objectStore('subjects');
       const taskStore = transaction.objectStore('tasks');
       const calendarStore = transaction.objectStore('calendar_entries');
       const fileStore = transaction.objectStore('file_attachments');
+      const boardStore = transaction.objectStore('board_states');
 
       subjectStore.delete(subjectId);
 
@@ -124,7 +162,11 @@ export async function deleteSubject(subjectId: string): Promise<void> {
           if (t.solutionAttachment?.fileId) {
             fileStore.delete(t.solutionAttachment.fileId);
           }
+          if (t.exampleAttachment?.fileId) {
+            fileStore.delete(t.exampleAttachment.fileId);
+          }
           taskStore.delete(t.id);
+          boardStore.delete(t.id);
         });
       };
 
@@ -206,9 +248,10 @@ export async function deleteTask(taskId: string): Promise<void> {
   const db = await getDB();
   return new Promise((resolve, reject) => {
     try {
-      const transaction = db.transaction(['tasks', 'file_attachments'], 'readwrite');
+      const transaction = db.transaction(['tasks', 'file_attachments', 'board_states'], 'readwrite');
       const taskStore = transaction.objectStore('tasks');
       const fileStore = transaction.objectStore('file_attachments');
+      const boardStore = transaction.objectStore('board_states');
 
       const getReq = taskStore.get(taskId);
       getReq.onsuccess = () => {
@@ -216,7 +259,11 @@ export async function deleteTask(taskId: string): Promise<void> {
         if (existing?.solutionAttachment?.fileId) {
           fileStore.delete(existing.solutionAttachment.fileId);
         }
+        if (existing?.exampleAttachment?.fileId) {
+          fileStore.delete(existing.exampleAttachment.fileId);
+        }
         taskStore.delete(taskId);
+        boardStore.delete(taskId);
       };
 
       transaction.oncomplete = () => resolve();
@@ -288,6 +335,53 @@ export async function deleteFileAttachment(fileId: string): Promise<void> {
   });
 }
 
+// ------------------- BOARD STATES -------------------
+
+export async function getBoardState(taskId: string): Promise<BoardState | null> {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    try {
+      const transaction = db.transaction('board_states', 'readonly');
+      const store = transaction.objectStore('board_states');
+      const req = store.get(taskId);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+export async function saveBoardState(state: BoardState): Promise<void> {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    try {
+      const transaction = db.transaction('board_states', 'readwrite');
+      const store = transaction.objectStore('board_states');
+      const req = store.put(state);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+export async function deleteBoardState(taskId: string): Promise<void> {
+  const db = await getDB();
+  return new Promise((resolve, reject) => {
+    try {
+      const transaction = db.transaction('board_states', 'readwrite');
+      const store = transaction.objectStore('board_states');
+      const req = store.delete(taskId);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 // ------------------- CALENDAR ENTRIES -------------------
 
 export async function getAllCalendarEntries(): Promise<CalendarEntry[]> {
@@ -345,9 +439,5 @@ export async function deleteCalendarEntry(entryId: string): Promise<void> {
 // ------------------- INITIAL SEEDING -------------------
 
 export async function initializeDatabaseIfEmpty(): Promise<void> {
-  // Database initializes schema stores automatically via onupgradeneeded.
-  // Out of the box, the app starts completely pristine and empty.
-  // The user creates their own subjects, tasks, and calendar records.
   return Promise.resolve();
 }
-

@@ -49,4 +49,108 @@ export interface CalendarEntry {
   updatedAt: number;
 }
 
-export type MainNavSection = 'subjects' | 'calendar';
+export type MainNavSection = 'subjects' | 'calendar' | 'board';
+
+// ==========================================
+// INTERACTIVE BOARD (WHITEBOARD) TYPES
+// ==========================================
+
+export type BoardTool = 'select' | 'pan' | 'pen' | 'eraser' | 'text' | 'image' | 'shape';
+export type EraserMode = 'object' | 'area';
+
+export type ShapeType =
+  | 'square'
+  | 'rectangle'
+  | 'rounded-rectangle'
+  | 'circle'
+  | 'ellipse'
+  | 'triangle'
+  | 'right-triangle'
+  | 'right-triangle-flipped'
+  | 'cube'
+  | 'rhombus'
+  | 'trapezoid'
+  | 'parallelogram'
+  | 'pentagon'
+  | 'hexagon'
+  | 'star'
+  | 'arrow-right'
+  | 'arrow-left'
+  | 'arrow-up'
+  | 'arrow-down'
+  | 'line-h'
+  | 'line-slash'
+  | 'line-backslash';
+
+export interface BoardShapeObject {
+  id: string;
+  type: ShapeType;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color: string;
+  strokeWidth?: number;
+  rotation?: number;
+}
+
+export interface BoardPoint {
+  x: number;
+  y: number;
+}
+
+export interface BoardStroke {
+  id: string;
+  points: BoardPoint[];
+  color: string;
+  width: number;
+  opacity?: number;
+}
+
+export interface BoardTextObject {
+  id: string;
+  x: number;
+  y: number;
+  text: string;
+  fontSize: number;
+  color: string;
+  width?: number;
+  height?: number;
+  rotation?: number; // degrees
+}
+
+export interface BoardImageObject {
+  id: string;
+  fileId?: string; // stored in IndexedDB file_attachments store
+  dataUrl?: string; // fallback or immediate object URL
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number; // degrees
+  naturalWidth?: number;
+  naturalHeight?: number;
+}
+
+export interface SelectedItem {
+  type: 'image' | 'text' | 'stroke' | 'shape';
+  id: string;
+}
+
+export interface BoardState {
+  subjectId: string;
+  taskId: string;
+  strokes: BoardStroke[];
+  texts: BoardTextObject[];
+  images: BoardImageObject[];
+  shapes?: BoardShapeObject[];
+  viewport: {
+    x: number;
+    y: number;
+    zoom: number;
+  };
+  updatedAt: number;
+}
+
+export * from './ide';
+

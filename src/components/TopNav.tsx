@@ -91,15 +91,18 @@ export const TopNav: React.FC<TopNavProps> = ({
   return (
     <header
       data-tauri-drag-region
+      onPointerDown={(e) => e.stopPropagation()}
+      onPointerMove={(e) => e.stopPropagation()}
+      onPointerUp={(e) => e.stopPropagation()}
       onDoubleClick={handleHeaderDoubleClick}
-      className="sticky top-0 z-40 w-full h-11 border-b border-white/[0.08] bg-[#0c0c0c] select-none flex items-stretch justify-between"
+      className="sticky top-0 z-40 w-full h-11 border-b border-white/[0.08] bg-[#0c0c0c] select-none flex items-stretch justify-between cursor-default"
     >
       {/* Left: Persona Brand (1 icon + 1 title) + Section Nav */}
       <div className="flex items-center gap-4 sm:gap-6 px-3 sm:px-4 h-full shrink-0" data-tauri-drag-region>
         {/* Brand */}
         <button
           onClick={onLogoClick || (() => onSelectSection('subjects'))}
-          className="flex items-center gap-2.5 group focus:outline-none py-1 shrink-0"
+          className="flex items-center gap-2.5 group focus:outline-none py-1 shrink-0 cursor-pointer"
           aria-label="Persona"
           data-no-drag
         >
@@ -115,7 +118,7 @@ export const TopNav: React.FC<TopNavProps> = ({
         <nav className="flex items-center gap-1 h-full" data-no-drag>
           <button
             onClick={() => onSelectSection('subjects')}
-            className={`relative px-3 py-1 text-xs transition-colors rounded font-medium select-none ${
+            className={`relative px-3 py-1 text-xs transition-colors rounded font-medium select-none cursor-pointer ${
               currentSection === 'subjects'
                 ? 'text-white bg-white/[0.08]'
                 : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.04]'
@@ -129,7 +132,7 @@ export const TopNav: React.FC<TopNavProps> = ({
 
           <button
             onClick={() => onSelectSection('calendar')}
-            className={`relative px-3 py-1 text-xs transition-colors rounded font-medium select-none ${
+            className={`relative px-3 py-1 text-xs transition-colors rounded font-medium select-none cursor-pointer ${
               currentSection === 'calendar'
                 ? 'text-white bg-white/[0.08]'
                 : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.04]'
@@ -137,6 +140,20 @@ export const TopNav: React.FC<TopNavProps> = ({
           >
             Календарь
             {currentSection === 'calendar' && (
+              <span className="absolute bottom-0 left-2 right-2 h-[2px] bg-white rounded-full" />
+            )}
+          </button>
+
+          <button
+            onClick={() => onSelectSection('board')}
+            className={`relative px-3 py-1 text-xs transition-colors rounded font-medium select-none cursor-pointer ${
+              currentSection === 'board'
+                ? 'text-white bg-white/[0.08]'
+                : 'text-neutral-400 hover:text-neutral-200 hover:bg-white/[0.04]'
+            }`}
+          >
+            Доска
+            {currentSection === 'board' && (
               <span className="absolute bottom-0 left-2 right-2 h-[2px] bg-white rounded-full" />
             )}
           </button>
@@ -150,11 +167,11 @@ export const TopNav: React.FC<TopNavProps> = ({
       />
 
       {/* Right: Authentic Desktop Window Controls (Minimize, Maximize/Restore, Close) */}
-      <div className="flex items-stretch h-full select-none" data-no-drag>
+      <div className="flex items-stretch h-full select-none cursor-default" data-no-drag>
         {/* Minimize */}
         <button
           onClick={handleMinimize}
-          className="w-11 h-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-white/[0.08] transition-colors focus:outline-none"
+          className="w-11 h-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-white/[0.08] transition-colors focus:outline-none cursor-pointer"
           title="Свернуть"
           aria-label="Свернуть"
         >
@@ -167,7 +184,7 @@ export const TopNav: React.FC<TopNavProps> = ({
         */}
         <button
           onClick={handleToggleMaximize}
-          className="w-11 h-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-white/[0.08] transition-colors focus:outline-none"
+          className="w-11 h-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-white/[0.08] transition-colors focus:outline-none cursor-pointer"
           title={isMaximized ? 'Свернуть в окно' : 'Развернуть'}
           aria-label={isMaximized ? 'Свернуть в окно' : 'Развернуть'}
         >
@@ -177,7 +194,7 @@ export const TopNav: React.FC<TopNavProps> = ({
         {/* Close (Native Windows Red Hover) */}
         <button
           onClick={handleClose}
-          className="w-11 h-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-[#e81123] transition-colors focus:outline-none"
+          className="w-11 h-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-[#e81123] transition-colors focus:outline-none cursor-pointer"
           title="Закрыть"
           aria-label="Закрыть"
         >

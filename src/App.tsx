@@ -20,11 +20,13 @@ import {
 } from './lib/db';
 import { IntroScreen } from './components/IntroScreen';
 import { TopNav } from './components/TopNav';
-import { PersonaLogo } from './components/PersonaLogo';
 import { SubjectsView } from './components/subjects/SubjectsView';
 import { SubjectDetailView } from './components/subjects/SubjectDetailView';
 import { TaskDetailView } from './components/subjects/TaskDetailView';
 import { CalendarView } from './components/calendar/CalendarView';
+import { BoardSubjectPicker } from './components/board/BoardSubjectPicker';
+import { BoardTaskPicker } from './components/board/BoardTaskPicker';
+import { BoardView } from './components/board/BoardView';
 import { nativeToggleFullscreen, subscribeToWindowState } from './lib/tauriWindow';
 
 export default function App() {
@@ -44,8 +46,14 @@ export default function App() {
 
   // Navigation
   const [currentSection, setCurrentSection] = useState<MainNavSection>('subjects');
+
+  // Subjects section selection state
   const [selectedSubjectId, setSelectedSubjectId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+
+  // Board section selection state
+  const [boardSubjectId, setBoardSubjectId] = useState<string | null>(null);
+  const [boardTaskId, setBoardTaskId] = useState<string | null>(null);
 
   // App State
   const [subjects, setSubjects] = useState<Subject[]>([]);
@@ -84,7 +92,7 @@ export default function App() {
     reloadData();
   }, [reloadData]);
 
-  // Global F11 fullscreen shortcut listener (F12 removed)
+  // Global F11 fullscreen shortcut listener
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'F11') {
@@ -99,10 +107,6 @@ export default function App() {
   // Section switcher
   const handleSelectSection = (section: MainNavSection) => {
     setCurrentSection(section);
-    // If switching to subjects from calendar, reset deep selection if needed or keep current
-    if (section === 'subjects' && !selectedSubjectId) {
-      // Stay on list
-    }
   };
 
   // Subject operations
@@ -129,6 +133,10 @@ export default function App() {
     if (selectedSubjectId === subjectId) {
       setSelectedSubjectId(null);
       setSelectedTaskId(null);
+    }
+    if (boardSubjectId === subjectId) {
+      setBoardSubjectId(null);
+      setBoardTaskId(null);
     }
     await reloadData();
   };
@@ -181,6 +189,9 @@ export default function App() {
     if (selectedTaskId === taskId) {
       setSelectedTaskId(null);
     }
+    if (boardTaskId === taskId) {
+      setBoardTaskId(null);
+    }
   };
 
   // Calendar operations
@@ -207,12 +218,18 @@ export default function App() {
     setCalendarEntries((prev) => prev.filter((e) => e.id !== entryId));
   };
 
-  // Current selections
+  // Current selections for Subjects tab
   const currentSubject = subjects.find((s) => s.id === selectedSubjectId);
   const currentSubjectTasks = selectedSubjectId ? tasksBySubject[selectedSubjectId] || [] : [];
   const currentTask = currentSubjectTasks.find((t) => t.id === selectedTaskId);
 
+  // Current selections for Board tab
+  const currentBoardSubject = subjects.find((s) => s.id === boardSubjectId);
+  const currentBoardTasks = boardSubjectId ? tasksBySubject[boardSubjectId] || [] : [];
+  const currentBoardTask = currentBoardTasks.find((t) => t.id === boardTaskId);
+
   const isWindowMaximized = windowState.isMaximized || windowState.isFullscreen;
+  const isFullBleedBoard = currentSection === 'board' && Boolean(boardTaskId && currentBoardTask && currentBoardSubject);
 
   return (
     <div className="w-full h-full bg-[#0a0a0a] text-neutral-100 flex flex-col overflow-hidden select-none border border-white/[0.08]">
@@ -234,79 +251,132 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <main className="flex-1 overflow-y-auto overflow-x-hidden pb-12 persona-bg-ambient select-none">
-          {storageError && (
-            <div className="max-w-xl mx-auto mt-6 px-4">
-              <div className="p-3.5 rounded-xl border border-white/[0.15] bg-[#141414] text-xs text-neutral-300 flex items-center justify-between gap-3">
-                <span>{storageError}</span>
-                <button
-                  onClick={() => reloadData()}
-                  className="px-2.5 py-1 rounded bg-white/[0.1] hover:bg-white/[0.2] text-white font-medium transition-colors shrink-0"
-                >
-                  Повторить
-                </button>
-              </div>
+      <main
+        className={`flex-1 overflow-hidden select-none ${
+          isFullBleedBoard ? 'p-0 relative' : 'overflow-y-auto overflow-x-hidden pb-12 persona-bg-ambient'
+        }`}
+        style={isFullBleedBoard ? { overflow: 'clip' } : undefined}
+        onScroll={
+          isFullBleedBoard
+            ? (e) => {
+                if (e.currentTarget.scrollTop !== 0 || e.currentTarget.scrollLeft !== 0) {
+                  e.currentTarget.scrollTop = 0;
+                  e.currentTarget.scrollLeft = 0;
+                }
+              }
+            : undefined
+        }
+      >
+        {storageError && (
+          <div className="max-w-xl mx-auto mt-6 px-4">
+            <div className="p-3.5 rounded-xl border border-white/[0.15] bg-[#141414] text-xs text-neutral-300 flex items-center justify-between gap-3">
+              <span>{storageError}</span>
+              <button
+                onClick={() => reloadData()}
+                className="px-2.5 py-1 rounded bg-white/[0.1] hover:bg-white/[0.2] text-white font-medium transition-colors shrink-0"
+              >
+                Повторить
+              </button>
             </div>
-          )}
+          </div>
+        )}
 
-          {isLoading ? (
-            <div className="flex items-center justify-center min-h-[60vh]">
-              <div className="w-6 h-6 border-2 border-white/20 border-t-white rounded-full animate-spin" />
-            </div>
-          ) : (
-            <motion.div
-              key={`${currentSection}-${selectedSubjectId || 'root'}-${selectedTaskId || 'none'}`}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ duration: 0.15, ease: 'easeOut' }}
-            >
-              {currentSection === 'subjects' && (
-                <>
-                  {selectedTaskId && currentTask && currentSubject ? (
-                    <TaskDetailView
-                      task={currentTask}
-                      subject={currentSubject}
-                      allTasks={currentSubjectTasks}
-                      onBack={() => setSelectedTaskId(null)}
-                      onSave={handleSaveTask}
-                      onDelete={handleDeleteTask}
-                      onSelectTask={(id) => setSelectedTaskId(id)}
-                    />
-                  ) : selectedSubjectId && currentSubject ? (
-                    <SubjectDetailView
-                      subject={currentSubject}
-                      tasks={currentSubjectTasks}
-                      onBack={() => setSelectedSubjectId(null)}
-                      onSelectTask={(taskId) => setSelectedTaskId(taskId)}
-                      onAddTask={handleAddTask}
-                      onDeleteTask={handleDeleteTask}
-                      onRenameSubject={(newTitle: string) => handleRenameSubject(currentSubject.id, newTitle)}
-                    />
-                  ) : (
-                    <SubjectsView
-                      subjects={subjects}
-                      tasksBySubject={tasksBySubject}
-                      onSelectSubject={(id) => setSelectedSubjectId(id)}
-                      onAddSubject={handleAddSubject}
-                      onRenameSubject={handleRenameSubject}
-                      onDeleteSubject={handleDeleteSubject}
-                    />
-                  )}
-                </>
-              )}
+        {isLoading ? (
+          <div className="flex items-center justify-center min-h-[60vh]">
+            <div className="w-6 h-6 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+          </div>
+        ) : (
+          <motion.div
+            key={`${currentSection}-${selectedSubjectId || 'root'}-${selectedTaskId || 'none'}-${boardSubjectId || 'broot'}-${boardTaskId || 'bnone'}`}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.15, ease: 'easeOut' }}
+            className="w-full h-full"
+          >
+            {/* 1. SUBJECTS SECTION */}
+            {currentSection === 'subjects' && (
+              <>
+                {selectedTaskId && currentTask && currentSubject ? (
+                  <TaskDetailView
+                    task={currentTask}
+                    subject={currentSubject}
+                    allTasks={currentSubjectTasks}
+                    onBack={() => setSelectedTaskId(null)}
+                    onSave={handleSaveTask}
+                    onDelete={handleDeleteTask}
+                    onSelectTask={(id) => setSelectedTaskId(id)}
+                  />
+                ) : selectedSubjectId && currentSubject ? (
+                  <SubjectDetailView
+                    subject={currentSubject}
+                    tasks={currentSubjectTasks}
+                    onBack={() => setSelectedSubjectId(null)}
+                    onSelectTask={(taskId) => setSelectedTaskId(taskId)}
+                    onAddTask={handleAddTask}
+                    onDeleteTask={handleDeleteTask}
+                    onRenameSubject={(newTitle: string) => handleRenameSubject(currentSubject.id, newTitle)}
+                  />
+                ) : (
+                  <SubjectsView
+                    subjects={subjects}
+                    tasksBySubject={tasksBySubject}
+                    onSelectSubject={(id) => setSelectedSubjectId(id)}
+                    onAddSubject={handleAddSubject}
+                    onRenameSubject={handleRenameSubject}
+                    onDeleteSubject={handleDeleteSubject}
+                  />
+                )}
+              </>
+            )}
 
-              {currentSection === 'calendar' && (
-                <CalendarView
-                  subjects={subjects}
-                  entries={calendarEntries}
-                  onAddEntry={handleAddCalendarEntry}
-                  onUpdateEntry={handleUpdateCalendarEntry}
-                  onDeleteEntry={handleDeleteCalendarEntry}
-                />
-              )}
-            </motion.div>
-          )}
-        </main>
+            {/* 2. CALENDAR SECTION */}
+            {currentSection === 'calendar' && (
+              <CalendarView
+                subjects={subjects}
+                entries={calendarEntries}
+                onAddEntry={handleAddCalendarEntry}
+                onUpdateEntry={handleUpdateCalendarEntry}
+                onDeleteEntry={handleDeleteCalendarEntry}
+              />
+            )}
+
+            {/* 3. BOARD (ДОСКА) SECTION */}
+            {currentSection === 'board' && (
+              <>
+                {boardTaskId && currentBoardTask && currentBoardSubject ? (
+                  <BoardView
+                    subject={currentBoardSubject}
+                    task={currentBoardTask}
+                    onBack={() => setBoardTaskId(null)}
+                    onSelectAnotherTask={() => setBoardTaskId(null)}
+                  />
+                ) : boardSubjectId && currentBoardSubject ? (
+                  <BoardTaskPicker
+                    subject={currentBoardSubject}
+                    tasks={currentBoardTasks}
+                    onBack={() => setBoardSubjectId(null)}
+                    onSelectTask={(taskId) => setBoardTaskId(taskId)}
+                    onGoToSubject={() => {
+                      setSelectedSubjectId(currentBoardSubject.id);
+                      setSelectedTaskId(null);
+                      setCurrentSection('subjects');
+                    }}
+                  />
+                ) : (
+                  <BoardSubjectPicker
+                    subjects={subjects}
+                    tasksBySubject={tasksBySubject}
+                    onSelectSubject={(subjId) => setBoardSubjectId(subjId)}
+                    onGoToSubjectsSection={() => {
+                      setCurrentSection('subjects');
+                    }}
+                  />
+                )}
+              </>
+            )}
+          </motion.div>
+        )}
+      </main>
     </div>
   );
 }
