@@ -69,7 +69,8 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
   const templateFileInputRef = useRef<HTMLInputElement>(null);
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Keep latest state in ref for safe flush on unmount
+  // Keep latest state in ref for safe synchronous flush on unmount or task switch
+  const hasPendingChangesRef = useRef(false);
   const pendingStateRef = useRef({
     task,
     title,
@@ -77,7 +78,6 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     solutionText,
     exampleAttachment,
     templateAttachment,
-    hasPendingChanges: false,
   });
 
   pendingStateRef.current = {
@@ -87,7 +87,6 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     solutionText,
     exampleAttachment,
     templateAttachment,
-    hasPendingChanges: saveStatus === 'unsaved',
   };
 
   // Helper to load example Data URL
@@ -150,19 +149,6 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     setTemplateUrl(null);
   }, []);
 
-  // Synchronize when task prop updates
-  useEffect(() => {
-    setTitle(task.title);
-    setNotes(task.notes);
-    setSolutionText(task.solutionText || '');
-    setExampleAttachment(task.exampleAttachment || null);
-    setTemplateAttachment(task.solutionAttachment || null);
-    setSaveStatus('saved');
-
-    loadExampleBlob(task.exampleAttachment || null);
-    loadTemplateBlob(task.solutionAttachment || null);
-  }, [task.id, loadExampleBlob, loadTemplateBlob]);
-
   // Flush pending changes
   const flushSave = useCallback(async () => {
     if (saveTimeoutRef.current) {
@@ -170,17 +156,17 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
       saveTimeoutRef.current = null;
     }
 
-    const {
-      hasPendingChanges,
-      task: curTask,
-      title: curTitle,
-      notes: curNotes,
-      solutionText: curSolutionText,
-      exampleAttachment: curExampleAtt,
-      templateAttachment: curTemplateAtt,
-    } = pendingStateRef.current;
+    if (hasPendingChangesRef.current) {
+      hasPendingChangesRef.current = false;
+      const {
+        task: curTask,
+        title: curTitle,
+        notes: curNotes,
+        solutionText: curSolutionText,
+        exampleAttachment: curExampleAtt,
+        templateAttachment: curTemplateAtt,
+      } = pendingStateRef.current;
 
-    if (hasPendingChanges) {
       setSaveStatus('saving');
       const updated: TaskItem = {
         ...curTask,
@@ -191,25 +177,48 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
         solutionAttachment: curTemplateAtt,
         updatedAt: Date.now(),
       };
-      await onSave(updated);
-      setSaveStatus('saved');
+      try {
+        await onSave(updated);
+        setSaveStatus('saved');
+      } catch (err) {
+        hasPendingChangesRef.current = true;
+        setSaveStatus('unsaved');
+        console.error('Ошибка сохранения задания:', err);
+      }
     }
   }, [onSave]);
+
+  // Synchronize when task prop updates
+  useEffect(() => {
+    setTitle(task.title);
+    setNotes(task.notes);
+    setSolutionText(task.solutionText || '');
+    setExampleAttachment(task.exampleAttachment || null);
+    setTemplateAttachment(task.solutionAttachment || null);
+    hasPendingChangesRef.current = false;
+    setSaveStatus('saved');
+
+    loadExampleBlob(task.exampleAttachment || null);
+    loadTemplateBlob(task.solutionAttachment || null);
+  }, [task.id, loadExampleBlob, loadTemplateBlob]);
 
   // Cleanup on unmount
   useEffect(() => {
     const handleBeforeUnload = () => {
-      flushSave();
+      void flushSave();
     };
 
     window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', handleBeforeUnload);
 
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', handleBeforeUnload);
       if (saveTimeoutRef.current) {
         clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
       }
-      flushSave();
+      void flushSave();
     };
   }, [flushSave]);
 
@@ -221,23 +230,23 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     newExampleAtt: SolutionAttachment | null,
     newTemplateAtt: SolutionAttachment | null
   ) => {
+    hasPendingChangesRef.current = true;
+    pendingStateRef.current = {
+      task,
+      title: newTitle,
+      notes: newNotes,
+      solutionText: newSolutionText,
+      exampleAttachment: newExampleAtt,
+      templateAttachment: newTemplateAtt,
+    };
     setSaveStatus('unsaved');
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
     }
     saveTimeoutRef.current = setTimeout(async () => {
-      setSaveStatus('saving');
-      const updated: TaskItem = {
-        ...task,
-        title: newTitle.trim() || `Задание ${task.taskNumber}`,
-        notes: newNotes,
-        solutionText: newSolutionText,
-        exampleAttachment: newExampleAtt,
-        solutionAttachment: newTemplateAtt,
-        updatedAt: Date.now(),
-      };
-      await onSave(updated);
-      setSaveStatus('saved');
+      saveTimeoutRef.current = null;
+      await flushSave();
     }, 500);
   };
 
@@ -258,11 +267,8 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
 
   // Upload Photo for Example
   const handleExampleFileUpload = async (file: File) => {
+    const prevFileId = exampleAttachment?.fileId;
     try {
-      if (exampleAttachment?.fileId) {
-        await deleteFileAttachment(exampleAttachment.fileId).catch(() => {});
-      }
-
       const dataUrl = await readFileAsDataUrl(file);
       const fileId = `ex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       await saveFileAttachment(fileId, file, file.name, file.type, file.size);
@@ -280,6 +286,10 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
       setExampleUrl(dataUrl);
       triggerAutoSave(title, notes, solutionText, newAtt, templateAttachment);
 
+      if (prevFileId && prevFileId !== fileId) {
+        await deleteFileAttachment(prevFileId).catch(() => {});
+      }
+
       if (exampleFileInputRef.current) {
         exampleFileInputRef.current.value = '';
       }
@@ -290,12 +300,13 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
 
   const handleRemoveExample = async (e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    if (exampleAttachment?.fileId) {
-      await deleteFileAttachment(exampleAttachment.fileId).catch(() => {});
-    }
+    const prevFileId = exampleAttachment?.fileId;
     setExampleAttachment(null);
     setExampleUrl(null);
     triggerAutoSave(title, notes, solutionText, null, templateAttachment);
+    if (prevFileId) {
+      await deleteFileAttachment(prevFileId).catch(() => {});
+    }
     if (exampleFileInputRef.current) {
       exampleFileInputRef.current.value = '';
     }
@@ -303,11 +314,8 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
 
   // Upload Photo for Template
   const handleTemplateFileUpload = async (file: File) => {
+    const prevFileId = templateAttachment?.fileId;
     try {
-      if (templateAttachment?.fileId) {
-        await deleteFileAttachment(templateAttachment.fileId).catch(() => {});
-      }
-
       const dataUrl = await readFileAsDataUrl(file);
       const fileId = `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       await saveFileAttachment(fileId, file, file.name, file.type, file.size);
@@ -325,6 +333,10 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
       setTemplateUrl(dataUrl);
       triggerAutoSave(title, notes, solutionText, exampleAttachment, newAtt);
 
+      if (prevFileId && prevFileId !== fileId) {
+        await deleteFileAttachment(prevFileId).catch(() => {});
+      }
+
       if (templateFileInputRef.current) {
         templateFileInputRef.current.value = '';
       }
@@ -335,12 +347,13 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
 
   const handleRemoveTemplate = async (e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    if (templateAttachment?.fileId) {
-      await deleteFileAttachment(templateAttachment.fileId).catch(() => {});
-    }
+    const prevFileId = templateAttachment?.fileId;
     setTemplateAttachment(null);
     setTemplateUrl(null);
     triggerAutoSave(title, notes, solutionText, exampleAttachment, null);
+    if (prevFileId) {
+      await deleteFileAttachment(prevFileId).catch(() => {});
+    }
     if (templateFileInputRef.current) {
       templateFileInputRef.current.value = '';
     }

@@ -32,6 +32,21 @@ function setupStores(db: IDBDatabase) {
     const boardStore = db.createObjectStore('board_states', { keyPath: 'taskId' });
     boardStore.createIndex('subjectId', 'subjectId', { unique: false });
   }
+
+  // Dedicated IDE projects store (keyed by taskId)
+  if (!db.objectStoreNames.contains('ide_projects')) {
+    db.createObjectStore('ide_projects', { keyPath: 'taskId' });
+  }
+}
+
+function attachConnectionLifecycleHandlers(db: IDBDatabase) {
+  db.onversionchange = () => {
+    db.close();
+    dbPromise = null;
+  };
+  db.onclose = () => {
+    dbPromise = null;
+  };
 }
 
 export function getDB(): Promise<IDBDatabase> {
@@ -49,11 +64,23 @@ export function getDB(): Promise<IDBDatabase> {
           setupStores(db);
         };
 
+        request.onblocked = () => {
+          dbPromise = null;
+          reject(new Error('Локальная база данных IndexedDB заблокирована другим открытым соединением'));
+        };
+
         request.onsuccess = () => {
           const db = request.result;
 
           // Check if all needed stores exist in case DB was created or opened at different version
-          const neededStores = ['subjects', 'tasks', 'calendar_entries', 'file_attachments', 'board_states'];
+          const neededStores = [
+            'subjects',
+            'tasks',
+            'calendar_entries',
+            'file_attachments',
+            'board_states',
+            'ide_projects',
+          ];
           const missingStores = neededStores.some((store) => !db.objectStoreNames.contains(store));
 
           if (missingStores) {
@@ -64,7 +91,15 @@ export function getDB(): Promise<IDBDatabase> {
               const upgradeDb = (ev.target as IDBOpenDBRequest).result;
               setupStores(upgradeDb);
             };
-            upgradeReq.onsuccess = () => resolve(upgradeReq.result);
+            upgradeReq.onblocked = () => {
+              dbPromise = null;
+              reject(new Error('Обновление локальной базы данных IndexedDB заблокировано другим соединением'));
+            };
+            upgradeReq.onsuccess = () => {
+              const upgradedDb = upgradeReq.result;
+              attachConnectionLifecycleHandlers(upgradedDb);
+              resolve(upgradedDb);
+            };
             upgradeReq.onerror = () => {
               dbPromise = null;
               reject(upgradeReq.error || new Error('Не удалось обновить схему локальной базы данных IndexedDB'));
@@ -72,6 +107,7 @@ export function getDB(): Promise<IDBDatabase> {
             return;
           }
 
+          attachConnectionLifecycleHandlers(db);
           resolve(db);
         };
 
@@ -127,29 +163,39 @@ export async function saveSubject(subject: Subject): Promise<void> {
     try {
       const transaction = db.transaction('subjects', 'readwrite');
       const store = transaction.objectStore('subjects');
-      const request = store.put(subject);
+      store.put(subject);
 
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('Транзакция сохранения предмета прервана'));
     } catch (err) {
       reject(err);
     }
   });
 }
 
+// Track per-task board save queues and monotonic timestamps to prevent concurrent or out-of-order writes
+const boardSaveQueues = new Map<string, Promise<void>>();
+const latestBoardUpdatedAtByTask = new Map<string, number>();
+const deletedTaskIds = new Set<string>();
+
 export async function deleteSubject(subjectId: string): Promise<void> {
   const db = await getDB();
   return new Promise((resolve, reject) => {
     try {
-      const transaction = db.transaction(
-        ['subjects', 'tasks', 'calendar_entries', 'file_attachments', 'board_states'],
-        'readwrite'
-      );
+      const storeNames = ['subjects', 'tasks', 'calendar_entries', 'file_attachments', 'board_states'];
+      if (db.objectStoreNames.contains('ide_projects')) {
+        storeNames.push('ide_projects');
+      }
+      const transaction = db.transaction(storeNames, 'readwrite');
       const subjectStore = transaction.objectStore('subjects');
       const taskStore = transaction.objectStore('tasks');
       const calendarStore = transaction.objectStore('calendar_entries');
       const fileStore = transaction.objectStore('file_attachments');
       const boardStore = transaction.objectStore('board_states');
+      const ideStore = db.objectStoreNames.contains('ide_projects')
+        ? transaction.objectStore('ide_projects')
+        : null;
 
       subjectStore.delete(subjectId);
 
@@ -159,14 +205,32 @@ export async function deleteSubject(subjectId: string): Promise<void> {
       taskRequest.onsuccess = () => {
         const tasks: TaskItem[] = taskRequest.result || [];
         tasks.forEach((t) => {
+          deletedTaskIds.add(t.id);
+          latestBoardUpdatedAtByTask.delete(t.id);
+          boardSaveQueues.delete(t.id);
+
           if (t.solutionAttachment?.fileId) {
             fileStore.delete(t.solutionAttachment.fileId);
           }
           if (t.exampleAttachment?.fileId) {
             fileStore.delete(t.exampleAttachment.fileId);
           }
+          const boardGetReq = boardStore.get(t.id);
+          boardGetReq.onsuccess = () => {
+            const bState: BoardState | undefined = boardGetReq.result;
+            if (bState?.images) {
+              bState.images.forEach((img) => {
+                if (img.fileId && img.fileId !== t.exampleAttachment?.fileId && img.fileId !== t.solutionAttachment?.fileId) {
+                  fileStore.delete(img.fileId);
+                }
+              });
+            }
+            boardStore.delete(t.id);
+          };
+          if (ideStore) {
+            ideStore.delete(t.id);
+          }
           taskStore.delete(t.id);
-          boardStore.delete(t.id);
         });
       };
 
@@ -183,6 +247,7 @@ export async function deleteSubject(subjectId: string): Promise<void> {
 
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('Транзакция удаления предмета прервана'));
     } catch (err) {
       reject(err);
     }
@@ -229,15 +294,17 @@ export async function getTaskById(taskId: string): Promise<TaskItem | null> {
 }
 
 export async function saveTask(task: TaskItem): Promise<void> {
+  deletedTaskIds.delete(task.id);
   const db = await getDB();
   return new Promise((resolve, reject) => {
     try {
       const transaction = db.transaction('tasks', 'readwrite');
       const store = transaction.objectStore('tasks');
-      const request = store.put(task);
+      store.put(task);
 
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('Транзакция сохранения задания прервана'));
     } catch (err) {
       reject(err);
     }
@@ -245,13 +312,24 @@ export async function saveTask(task: TaskItem): Promise<void> {
 }
 
 export async function deleteTask(taskId: string): Promise<void> {
+  deletedTaskIds.add(taskId);
+  latestBoardUpdatedAtByTask.delete(taskId);
+  boardSaveQueues.delete(taskId);
+
   const db = await getDB();
   return new Promise((resolve, reject) => {
     try {
-      const transaction = db.transaction(['tasks', 'file_attachments', 'board_states'], 'readwrite');
+      const storeNames = ['tasks', 'file_attachments', 'board_states'];
+      if (db.objectStoreNames.contains('ide_projects')) {
+        storeNames.push('ide_projects');
+      }
+      const transaction = db.transaction(storeNames, 'readwrite');
       const taskStore = transaction.objectStore('tasks');
       const fileStore = transaction.objectStore('file_attachments');
       const boardStore = transaction.objectStore('board_states');
+      const ideStore = db.objectStoreNames.contains('ide_projects')
+        ? transaction.objectStore('ide_projects')
+        : null;
 
       const getReq = taskStore.get(taskId);
       getReq.onsuccess = () => {
@@ -262,12 +340,27 @@ export async function deleteTask(taskId: string): Promise<void> {
         if (existing?.exampleAttachment?.fileId) {
           fileStore.delete(existing.exampleAttachment.fileId);
         }
+        const boardGetReq = boardStore.get(taskId);
+        boardGetReq.onsuccess = () => {
+          const bState: BoardState | undefined = boardGetReq.result;
+          if (bState?.images) {
+            bState.images.forEach((img) => {
+              if (img.fileId && img.fileId !== existing?.exampleAttachment?.fileId && img.fileId !== existing?.solutionAttachment?.fileId) {
+                fileStore.delete(img.fileId);
+              }
+            });
+          }
+          boardStore.delete(taskId);
+        };
+        if (ideStore) {
+          ideStore.delete(taskId);
+        }
         taskStore.delete(taskId);
-        boardStore.delete(taskId);
       };
 
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('Транзакция удаления задания прервана'));
     } catch (err) {
       reject(err);
     }
@@ -296,9 +389,10 @@ export async function saveFileAttachment(
         size,
         uploadedAt: Date.now(),
       };
-      const req = store.put(item);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      store.put(item);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('Транзакция сохранения файла прервана'));
     } catch (err) {
       reject(err);
     }
@@ -321,14 +415,29 @@ export async function getFileAttachment(fileId: string): Promise<StoredFile | nu
 }
 
 export async function deleteFileAttachment(fileId: string): Promise<void> {
+  if (!fileId) return;
   const db = await getDB();
   return new Promise((resolve, reject) => {
     try {
-      const transaction = db.transaction('file_attachments', 'readwrite');
-      const store = transaction.objectStore('file_attachments');
-      const req = store.delete(fileId);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      const transaction = db.transaction(['file_attachments', 'board_states'], 'readwrite');
+      const fileStore = transaction.objectStore('file_attachments');
+      const boardStore = transaction.objectStore('board_states');
+
+      // Do not delete the underlying Blob if any saved board still references this fileId
+      const boardsReq = boardStore.getAll();
+      boardsReq.onsuccess = () => {
+        const boards: BoardState[] = boardsReq.result || [];
+        const usedOnBoard = boards.some((b) =>
+          b.images?.some((img) => img.fileId === fileId)
+        );
+        if (!usedOnBoard) {
+          fileStore.delete(fileId);
+        }
+      };
+
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('Транзакция удаления файла прервана'));
     } catch (err) {
       reject(err);
     }
@@ -338,13 +447,32 @@ export async function deleteFileAttachment(fileId: string): Promise<void> {
 // ------------------- BOARD STATES -------------------
 
 export async function getBoardState(taskId: string): Promise<BoardState | null> {
+  // Wait for any pending queued save for this taskId before reading
+  const pendingSave = boardSaveQueues.get(taskId);
+  if (pendingSave) {
+    try {
+      await pendingSave;
+    } catch {
+      // Ignore previous save error and proceed with read
+    }
+  }
+
   const db = await getDB();
   return new Promise((resolve, reject) => {
     try {
       const transaction = db.transaction('board_states', 'readonly');
       const store = transaction.objectStore('board_states');
       const req = store.get(taskId);
-      req.onsuccess = () => resolve(req.result || null);
+      req.onsuccess = () => {
+        const result: BoardState | null = req.result || null;
+        if (result && typeof result.updatedAt === 'number') {
+          const prevTs = latestBoardUpdatedAtByTask.get(taskId) ?? 0;
+          if (result.updatedAt > prevTs) {
+            latestBoardUpdatedAtByTask.set(taskId, result.updatedAt);
+          }
+        }
+        resolve(result);
+      };
       req.onerror = () => reject(req.error);
     } catch (err) {
       reject(err);
@@ -353,29 +481,85 @@ export async function getBoardState(taskId: string): Promise<BoardState | null> 
 }
 
 export async function saveBoardState(state: BoardState): Promise<void> {
-  const db = await getDB();
-  return new Promise((resolve, reject) => {
-    try {
-      const transaction = db.transaction('board_states', 'readwrite');
-      const store = transaction.objectStore('board_states');
-      const req = store.put(state);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    } catch (err) {
-      reject(err);
-    }
-  });
+  if (!state?.taskId || deletedTaskIds.has(state.taskId)) {
+    return;
+  }
+
+  const taskId = state.taskId;
+  const incomingTs = typeof state.updatedAt === 'number' ? state.updatedAt : Date.now();
+  const knownLatestTs = latestBoardUpdatedAtByTask.get(taskId) ?? 0;
+
+  // Reject stale snapshot immediately if a newer snapshot was already scheduled
+  if (incomingTs < knownLatestTs) {
+    return boardSaveQueues.get(taskId) ?? Promise.resolve();
+  }
+
+  latestBoardUpdatedAtByTask.set(taskId, incomingTs);
+
+  const previousSave = boardSaveQueues.get(taskId) ?? Promise.resolve();
+  const nextSave = previousSave
+    .catch(() => {})
+    .then(async () => {
+      if (deletedTaskIds.has(taskId)) return;
+
+      const currentLatestTs = latestBoardUpdatedAtByTask.get(taskId) ?? 0;
+      if (incomingTs < currentLatestTs) {
+        // Superseded by a newer queued snapshot while waiting
+        return;
+      }
+
+      const db = await getDB();
+      await new Promise<void>((resolve, reject) => {
+        try {
+          const transaction = db.transaction('board_states', 'readwrite');
+          const store = transaction.objectStore('board_states');
+          const getReq = store.get(taskId);
+
+          getReq.onsuccess = () => {
+            if (deletedTaskIds.has(taskId)) return;
+            const existing: BoardState | undefined = getReq.result;
+            if (
+              existing &&
+              typeof existing.updatedAt === 'number' &&
+              existing.updatedAt > incomingTs
+            ) {
+              // Never overwrite a newer persisted state with an older one
+              latestBoardUpdatedAtByTask.set(taskId, existing.updatedAt);
+              return;
+            }
+            store.put({
+              ...state,
+              updatedAt: incomingTs,
+            });
+          };
+
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () =>
+            reject(transaction.error || new Error('Транзакция сохранения доски прервана'));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+
+  boardSaveQueues.set(taskId, nextSave);
+  return nextSave;
 }
 
 export async function deleteBoardState(taskId: string): Promise<void> {
+  latestBoardUpdatedAtByTask.delete(taskId);
+  boardSaveQueues.delete(taskId);
+
   const db = await getDB();
   return new Promise((resolve, reject) => {
     try {
       const transaction = db.transaction('board_states', 'readwrite');
       const store = transaction.objectStore('board_states');
-      const req = store.delete(taskId);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
+      store.delete(taskId);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('Транзакция удаления доски прервана'));
     } catch (err) {
       reject(err);
     }
@@ -410,10 +594,11 @@ export async function saveCalendarEntry(entry: CalendarEntry): Promise<void> {
     try {
       const transaction = db.transaction('calendar_entries', 'readwrite');
       const store = transaction.objectStore('calendar_entries');
-      const request = store.put(entry);
+      store.put(entry);
 
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('Транзакция сохранения записи календаря прервана'));
     } catch (err) {
       reject(err);
     }
@@ -426,10 +611,11 @@ export async function deleteCalendarEntry(entryId: string): Promise<void> {
     try {
       const transaction = db.transaction('calendar_entries', 'readwrite');
       const store = transaction.objectStore('calendar_entries');
-      const request = store.delete(entryId);
+      store.delete(entryId);
 
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('Транзакция удаления записи календаря прервана'));
     } catch (err) {
       reject(err);
     }

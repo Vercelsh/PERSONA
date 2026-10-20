@@ -145,12 +145,27 @@ export const BoardTextElement: React.FC<BoardTextElementProps> = ({
     const nextVal = prevVal.substring(0, start) + pastedText + prevVal.substring(end);
 
     setCurrentText(nextVal);
+    onUpdateText(
+      {
+        ...textObj,
+        text: nextVal,
+      },
+      false
+    );
 
     requestAnimationFrame(() => {
       if (textareaRef.current) {
         textareaRef.current.style.height = 'auto';
         const h = Math.max(textObj.height || 38, textareaRef.current.scrollHeight);
         textareaRef.current.style.height = `${h}px`;
+        onUpdateText(
+          {
+            ...textObj,
+            text: nextVal,
+            height: h,
+          },
+          false
+        );
 
         const newPos = start + pastedText.length;
         try {
@@ -357,10 +372,19 @@ export const BoardTextElement: React.FC<BoardTextElementProps> = ({
           onPaste={handlePaste}
           onChange={(e) => {
             hasInteractedRef.current = true;
-            setCurrentText(e.target.value);
+            const nextVal = e.target.value;
+            setCurrentText(nextVal);
             e.target.style.height = 'auto';
             const h = Math.max(textObj.height || 38, e.target.scrollHeight);
             e.target.style.height = `${h}px`;
+            onUpdateText(
+              {
+                ...textObj,
+                text: nextVal,
+                height: h,
+              },
+              false
+            );
             if (window.scrollY !== 0 || window.scrollX !== 0) window.scrollTo(0, 0);
           }}
           onBlur={handleBlur}

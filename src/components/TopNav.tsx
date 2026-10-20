@@ -5,7 +5,7 @@ import {
   nativeMinimize,
   nativeToggleMaximize,
   nativeClose,
-  isTauriEnvironment,
+  nativeStartDragging,
 } from '../lib/tauriWindow';
 
 interface TopNavProps {
@@ -13,6 +13,7 @@ interface TopNavProps {
   onSelectSection: (section: MainNavSection) => void;
   onLogoClick?: () => void;
   isMaximized: boolean;
+  isFullscreen?: boolean;
   onToggleMaximize?: () => void;
 }
 
@@ -51,36 +52,45 @@ export const TopNav: React.FC<TopNavProps> = ({
   onSelectSection,
   onLogoClick,
   isMaximized,
+  isFullscreen = false,
   onToggleMaximize,
 }) => {
-  const handleMinimize = async (e: React.MouseEvent) => {
+  const handleMinimize = async (e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
+    e.currentTarget.blur();
     await nativeMinimize();
   };
 
-  const handleToggleMaximize = async (e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
-    if (isTauriEnvironment()) {
-      await nativeToggleMaximize();
-    } else {
-      // In web preview: toggle document fullscreen
-      if (!document.fullscreenElement) {
-        document.documentElement.requestFullscreen().catch(() => {});
-      } else {
-        document.exitFullscreen().catch(() => {});
+  const handleToggleMaximize = async (e?: React.MouseEvent<HTMLElement>) => {
+    if (e) {
+      e.stopPropagation();
+      if (e.currentTarget instanceof HTMLElement) {
+        e.currentTarget.blur();
       }
     }
+    await nativeToggleMaximize();
     if (onToggleMaximize) {
       onToggleMaximize();
     }
   };
 
-  const handleClose = async (e: React.MouseEvent) => {
+  const handleClose = async (e: React.MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
+    e.currentTarget.blur();
     await nativeClose();
   };
 
-  const handleHeaderDoubleClick = (e: React.MouseEvent) => {
+  const handleHeaderMouseDown = (e: React.MouseEvent<HTMLElement>) => {
+    if (isFullscreen) return;
+    if (e.button !== 0 || e.detail > 1) return;
+    if ((e.target as HTMLElement).closest('button, nav, a, input, [data-no-drag]')) {
+      return;
+    }
+    nativeStartDragging();
+  };
+
+  const handleHeaderDoubleClick = (e: React.MouseEvent<HTMLElement>) => {
+    if (isFullscreen) return;
     // Only double click if not on interactive elements
     if ((e.target as HTMLElement).closest('button, nav, a, input, [data-no-drag]')) {
       return;
@@ -90,15 +100,17 @@ export const TopNav: React.FC<TopNavProps> = ({
 
   return (
     <header
-      data-tauri-drag-region
+      onMouseDown={handleHeaderMouseDown}
       onPointerDown={(e) => e.stopPropagation()}
       onPointerMove={(e) => e.stopPropagation()}
       onPointerUp={(e) => e.stopPropagation()}
       onDoubleClick={handleHeaderDoubleClick}
-      className="sticky top-0 z-40 w-full h-11 border-b border-white/[0.08] bg-[#0c0c0c] select-none flex items-stretch justify-between cursor-default"
+      className="sticky top-0 z-40 w-full h-11 border-b border-white/[0.08] bg-[#0c0c0c] select-none flex items-stretch justify-between cursor-default shrink-0"
     >
       {/* Left: Persona Brand (1 icon + 1 title) + Section Nav */}
-      <div className="flex items-center gap-4 sm:gap-6 px-3 sm:px-4 h-full shrink-0" data-tauri-drag-region>
+      <div
+        className="flex items-center gap-4 sm:gap-6 px-3 sm:px-4 h-full shrink-0"
+      >
         {/* Brand */}
         <button
           onClick={onLogoClick || (() => onSelectSection('subjects'))}
@@ -160,47 +172,48 @@ export const TopNav: React.FC<TopNavProps> = ({
         </nav>
       </div>
 
-      {/* Center: Draggable Spacer (clean desktop titlebar drag region) */}
+      {/* Center: Draggable Spacer (clean desktop titlebar drag region when not in F11) */}
       <div
-        data-tauri-drag-region
         className="flex-1 h-full cursor-default"
       />
 
-      {/* Right: Authentic Desktop Window Controls (Minimize, Maximize/Restore, Close) */}
-      <div className="flex items-stretch h-full select-none cursor-default" data-no-drag>
-        {/* Minimize */}
-        <button
-          onClick={handleMinimize}
-          className="w-11 h-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-white/[0.08] transition-colors focus:outline-none cursor-pointer"
-          title="Свернуть"
-          aria-label="Свернуть"
-        >
-          <MinimizeIcon />
-        </button>
+      {/* Right: Authentic Desktop Window Controls (hidden in F11 Fullscreen mode) */}
+      {!isFullscreen && (
+        <div className="flex items-stretch h-full select-none cursor-default" data-no-drag>
+          {/* Minimize */}
+          <button
+            onClick={handleMinimize}
+            className="w-11 h-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-white/[0.08] transition-colors focus:outline-none cursor-pointer"
+            title="Свернуть"
+            aria-label="Свернуть"
+          >
+            <MinimizeIcon />
+          </button>
 
-        {/* Maximize / Restore:
-            - Windowed mode: 1 square (Maximize)
-            - Maximized/Fullscreen mode: 2 overlapping squares (Restore Down)
-        */}
-        <button
-          onClick={handleToggleMaximize}
-          className="w-11 h-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-white/[0.08] transition-colors focus:outline-none cursor-pointer"
-          title={isMaximized ? 'Свернуть в окно' : 'Развернуть'}
-          aria-label={isMaximized ? 'Свернуть в окно' : 'Развернуть'}
-        >
-          {isMaximized ? <RestoreIcon /> : <MaximizeIcon />}
-        </button>
+          {/* Maximize / Restore:
+              - Windowed mode: 1 square (Maximize)
+              - Maximized mode: 2 overlapping squares (Restore Down)
+          */}
+          <button
+            onClick={handleToggleMaximize}
+            className="w-11 h-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-white/[0.08] transition-colors focus:outline-none cursor-pointer"
+            title={isMaximized ? 'Свернуть в окно' : 'Развернуть'}
+            aria-label={isMaximized ? 'Свернуть в окно' : 'Развернуть'}
+          >
+            {isMaximized ? <RestoreIcon /> : <MaximizeIcon />}
+          </button>
 
-        {/* Close (Native Windows Red Hover) */}
-        <button
-          onClick={handleClose}
-          className="w-11 h-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-[#e81123] transition-colors focus:outline-none cursor-pointer"
-          title="Закрыть"
-          aria-label="Закрыть"
-        >
-          <CloseIcon />
-        </button>
-      </div>
+          {/* Close (Native Windows Red Hover) */}
+          <button
+            onClick={handleClose}
+            className="w-11 h-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-[#e81123] transition-colors focus:outline-none cursor-pointer"
+            title="Закрыть"
+            aria-label="Закрыть"
+          >
+            <CloseIcon />
+          </button>
+        </div>
+      )}
     </header>
   );
 };

@@ -239,7 +239,11 @@ export default function App() {
   const isFullBleedBoard = currentSection === 'board' && Boolean(boardTaskId && currentBoardTask && currentBoardSubject);
 
   return (
-    <div className="w-full h-full bg-[#0a0a0a] text-neutral-100 flex flex-col overflow-hidden select-none border border-white/[0.08]">
+    <div
+      className={`w-full h-full bg-[#0a0a0a] text-neutral-100 flex flex-col overflow-hidden select-none ${
+        isWindowMaximized ? 'border-0' : 'border border-white/[0.08]'
+      }`}
+    >
       {/* Intro Animation */}
       <AnimatePresence>
         {showIntro && <IntroScreen onComplete={() => setShowIntro(false)} />}
@@ -254,12 +258,13 @@ export default function App() {
           setSelectedSubjectId(null);
           setSelectedTaskId(null);
         }}
-        isMaximized={isWindowMaximized}
+        isMaximized={windowState.isMaximized}
+        isFullscreen={windowState.isFullscreen}
       />
 
       {/* Main Content Area */}
       <main
-        className={`flex-1 overflow-hidden select-none ${
+        className={`flex-1 min-h-0 overflow-hidden select-none ${
           isFullBleedBoard ? 'p-0 relative' : 'overflow-y-auto overflow-x-hidden pb-12 persona-bg-ambient'
         }`}
         style={isFullBleedBoard ? { overflow: 'clip' } : undefined}

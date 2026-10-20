@@ -111,15 +111,31 @@ export const BoardView: React.FC<BoardViewProps> = ({
   >([]);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
 
-  // State refs for clean gesture callbacks without stale closures
+  // State refs for clean gesture callbacks and synchronous unmount flushing without stale closures
   const strokesRef = useRef(strokes);
   const textsRef = useRef(texts);
   const imagesRef = useRef(images);
   const shapesRef = useRef(shapes);
-  useEffect(() => { strokesRef.current = strokes; }, [strokes]);
-  useEffect(() => { textsRef.current = texts; }, [texts]);
-  useEffect(() => { imagesRef.current = images; }, [images]);
-  useEffect(() => { shapesRef.current = shapes; }, [shapes]);
+  const viewportRef = useRef(viewport);
+  const subjectIdRef = useRef(subject.id);
+  const taskIdRef = useRef(task.id);
+
+  strokesRef.current = strokes;
+  textsRef.current = texts;
+  imagesRef.current = images;
+  shapesRef.current = shapes;
+  viewportRef.current = viewport;
+  subjectIdRef.current = subject.id;
+  taskIdRef.current = task.id;
+
+  // Auto-save & lifecycle coordination refs
+  const loadedTaskIdRef = useRef<string | null>(null);
+  const hydratingTaskIdRef = useRef<string | null>(null);
+  const isDirtyRef = useRef<boolean>(false);
+  const revisionRef = useRef<number>(0);
+  const savedRevisionRef = useRef<number>(0);
+  const lastUpdatedAtRef = useRef<number>(0);
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // DOM Containers
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -201,29 +217,123 @@ export const BoardView: React.FC<BoardViewProps> = ({
     return () => window.removeEventListener('resize', updateSize);
   }, []);
 
+  // Build a consistent snapshot of the current board state with a strictly monotonic timestamp
+  const buildBoardSnapshot = useCallback((targetTaskId: string, targetSubjectId: string): BoardState | null => {
+    if (loadedTaskIdRef.current !== targetTaskId) {
+      return null;
+    }
+
+    const activeStroke = activeStrokeRef.current;
+    const finalStrokes =
+      activeStroke && activeStroke.points.length > 0
+        ? [...strokesRef.current, activeStroke]
+        : strokesRef.current;
+
+    const nextTimestamp = Math.max(Date.now(), lastUpdatedAtRef.current + 1);
+    lastUpdatedAtRef.current = nextTimestamp;
+
+    return {
+      subjectId: targetSubjectId,
+      taskId: targetTaskId,
+      strokes: finalStrokes,
+      texts: textsRef.current,
+      images: imagesRef.current,
+      shapes: shapesRef.current,
+      viewport: viewportRef.current,
+      updatedAt: nextTimestamp,
+    };
+  }, []);
+
+  // Flush any pending unsaved changes for the loaded task immediately
+  const flushBoardSave = useCallback(
+    async (explicitTaskId?: string, explicitSubjectId?: string): Promise<void> => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+      }
+
+      const targetTaskId = explicitTaskId ?? taskIdRef.current;
+      const targetSubjectId = explicitSubjectId ?? subjectIdRef.current;
+
+      // Never save if the board state for this task has not finished loading from IndexedDB
+      if (loadedTaskIdRef.current !== targetTaskId) {
+        return;
+      }
+
+      const hasActiveStroke = Boolean(
+        activeStrokeRef.current && activeStrokeRef.current.points.length > 0
+      );
+      if (!isDirtyRef.current && savedRevisionRef.current >= revisionRef.current && !hasActiveStroke) {
+        return;
+      }
+
+      const snapshotRevision = revisionRef.current;
+      const snapshot = buildBoardSnapshot(targetTaskId, targetSubjectId);
+      if (!snapshot) return;
+
+      savedRevisionRef.current = snapshotRevision;
+      isDirtyRef.current = false;
+
+      try {
+        await saveBoardState(snapshot);
+      } catch (err) {
+        // Restore dirty flag if no newer save has already succeeded
+        if (savedRevisionRef.current === snapshotRevision) {
+          isDirtyRef.current = true;
+        }
+        console.error('Failed to save board state:', err);
+      }
+    },
+    [buildBoardSnapshot]
+  );
+
   // Load saved state for this specific task
   useEffect(() => {
     let active = true;
+    const currentTaskId = task.id;
+    const currentSubjectId = subject.id;
+
+    // Reset load status for the new task until getBoardState resolves
+    loadedTaskIdRef.current = null;
+    hydratingTaskIdRef.current = null;
+    isDirtyRef.current = false;
 
     async function loadData() {
       try {
-        const saved = await getBoardState(task.id);
+        const saved = await getBoardState(currentTaskId);
         if (!active) return;
 
         if (saved) {
-          setStrokes(saved.strokes || []);
-          setTexts(saved.texts || []);
-          setImages(saved.images || []);
-          setShapes(saved.shapes || []);
-          if (saved.viewport) {
-            setViewport(saved.viewport);
-          }
+          const loadedStrokes = saved.strokes || [];
+          const loadedTexts = saved.texts || [];
+          const loadedImages = saved.images || [];
+          const loadedShapes = saved.shapes || [];
+          const loadedViewport = saved.viewport || { x: 80, y: 80, zoom: 1 };
+
+          strokesRef.current = loadedStrokes;
+          textsRef.current = loadedTexts;
+          imagesRef.current = loadedImages;
+          shapesRef.current = loadedShapes;
+          viewportRef.current = loadedViewport;
+
+          lastUpdatedAtRef.current = Math.max(lastUpdatedAtRef.current, saved.updatedAt || 0);
+          revisionRef.current = 0;
+          savedRevisionRef.current = 0;
+          isDirtyRef.current = false;
+          hydratingTaskIdRef.current = currentTaskId;
+          loadedTaskIdRef.current = currentTaskId;
+
+          setStrokes(loadedStrokes);
+          setTexts(loadedTexts);
+          setImages(loadedImages);
+          setShapes(loadedShapes);
+          setViewport(loadedViewport);
           setHistory([
             {
-              strokes: saved.strokes || [],
-              texts: saved.texts || [],
-              images: saved.images || [],
-              shapes: saved.shapes || [],
+              strokes: loadedStrokes,
+              texts: loadedTexts,
+              images: loadedImages,
+              shapes: loadedShapes,
             },
           ]);
           setHistoryIndex(0);
@@ -241,11 +351,26 @@ export const BoardView: React.FC<BoardViewProps> = ({
             });
           }
 
+          const initialViewport = { x: 80, y: 80, zoom: 1 };
+
+          strokesRef.current = [];
+          textsRef.current = [];
+          imagesRef.current = initialImages;
+          shapesRef.current = [];
+          viewportRef.current = initialViewport;
+
+          const hasInitialSeededContent = initialImages.length > 0;
+          revisionRef.current = hasInitialSeededContent ? 1 : 0;
+          savedRevisionRef.current = 0;
+          isDirtyRef.current = hasInitialSeededContent;
+          hydratingTaskIdRef.current = currentTaskId;
+          loadedTaskIdRef.current = currentTaskId;
+
           setStrokes([]);
           setTexts([]);
           setImages(initialImages);
           setShapes([]);
-          setViewport({ x: 80, y: 80, zoom: 1 });
+          setViewport(initialViewport);
           setHistory([
             {
               strokes: [],
@@ -265,8 +390,22 @@ export const BoardView: React.FC<BoardViewProps> = ({
 
     return () => {
       active = false;
+      void flushBoardSave(currentTaskId, currentSubjectId);
     };
-  }, [task.id, task.exampleAttachment?.fileId]);
+  }, [task.id, subject.id, task.exampleAttachment?.fileId, flushBoardSave]);
+
+  // Flush pending board changes if the window is closed or hidden
+  useEffect(() => {
+    const handleUnload = () => {
+      void flushBoardSave();
+    };
+    window.addEventListener('beforeunload', handleUnload);
+    window.addEventListener('pagehide', handleUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+      window.removeEventListener('pagehide', handleUnload);
+    };
+  }, [flushBoardSave]);
 
   // Push unified history entry
   const pushHistory = useCallback(
@@ -276,13 +415,24 @@ export const BoardView: React.FC<BoardViewProps> = ({
       newImages: BoardImageObject[],
       newShapes?: BoardShapeObject[]
     ) => {
+      const resolvedShapes = newShapes !== undefined ? newShapes : shapesRef.current;
+      strokesRef.current = newStrokes;
+      textsRef.current = newTexts;
+      imagesRef.current = newImages;
+      shapesRef.current = resolvedShapes;
+
+      if (loadedTaskIdRef.current === taskIdRef.current) {
+        revisionRef.current += 1;
+        isDirtyRef.current = true;
+      }
+
       setHistory((prev) => {
         const next = prev.slice(0, historyIndex + 1);
         next.push({
           strokes: newStrokes,
           texts: newTexts,
           images: newImages,
-          shapes: newShapes !== undefined ? newShapes : shapesRef.current,
+          shapes: resolvedShapes,
         });
         if (next.length > 50) next.shift();
         return next;
@@ -296,44 +446,62 @@ export const BoardView: React.FC<BoardViewProps> = ({
     pushHistory(strokesRef.current, textsRef.current, imagesRef.current, shapesRef.current);
   }, [pushHistory]);
 
-  // Background auto-save debounce
-  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
+  // Background auto-save debounce (only after initial load completes for current task)
   useEffect(() => {
-    if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    if (loadedTaskIdRef.current !== task.id) {
+      return;
+    }
 
-    saveTimeoutRef.current = setTimeout(async () => {
-      try {
-        const stateToSave: BoardState = {
-          subjectId: subject.id,
-          taskId: task.id,
-          strokes,
-          texts,
-          images,
-          shapes,
-          viewport,
-          updatedAt: Date.now(),
-        };
-        await saveBoardState(stateToSave);
-      } catch (err) {
-        console.error('Failed to auto-save board state:', err);
+    // Ignore the state update triggered directly by initial DB hydration unless seeded with initial image
+    if (hydratingTaskIdRef.current === task.id) {
+      hydratingTaskIdRef.current = null;
+      if (!isDirtyRef.current) {
+        return;
       }
+    } else {
+      revisionRef.current += 1;
+      isDirtyRef.current = true;
+    }
+
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+
+    const currentTaskId = task.id;
+    const currentSubjectId = subject.id;
+
+    saveTimeoutRef.current = setTimeout(() => {
+      saveTimeoutRef.current = null;
+      void flushBoardSave(currentTaskId, currentSubjectId);
     }, 1000);
 
     return () => {
-      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+      }
     };
-  }, [strokes, texts, images, shapes, viewport, subject.id, task.id]);
+  }, [strokes, texts, images, shapes, viewport, subject.id, task.id, flushBoardSave]);
 
   // Undo / Redo actions
   const handleUndo = useCallback(() => {
     if (historyIndex > 0) {
       const targetState = history[historyIndex - 1];
+      const nextShapes = targetState.shapes || [];
+      strokesRef.current = targetState.strokes;
+      textsRef.current = targetState.texts;
+      imagesRef.current = targetState.images;
+      shapesRef.current = nextShapes;
+      if (loadedTaskIdRef.current === taskIdRef.current) {
+        revisionRef.current += 1;
+        isDirtyRef.current = true;
+      }
       setHistoryIndex((prev) => prev - 1);
       setStrokes(targetState.strokes);
       setTexts(targetState.texts);
       setImages(targetState.images);
-      setShapes(targetState.shapes || []);
+      setShapes(nextShapes);
       setSelectedItems([]);
       setEditingTextId(null);
     }
@@ -342,11 +510,20 @@ export const BoardView: React.FC<BoardViewProps> = ({
   const handleRedo = useCallback(() => {
     if (historyIndex < history.length - 1) {
       const targetState = history[historyIndex + 1];
+      const nextShapes = targetState.shapes || [];
+      strokesRef.current = targetState.strokes;
+      textsRef.current = targetState.texts;
+      imagesRef.current = targetState.images;
+      shapesRef.current = nextShapes;
+      if (loadedTaskIdRef.current === taskIdRef.current) {
+        revisionRef.current += 1;
+        isDirtyRef.current = true;
+      }
       setHistoryIndex((prev) => prev + 1);
       setStrokes(targetState.strokes);
       setTexts(targetState.texts);
       setImages(targetState.images);
-      setShapes(targetState.shapes || []);
+      setShapes(nextShapes);
       setSelectedItems([]);
       setEditingTextId(null);
     }
@@ -723,7 +900,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
       let changed = false;
       const selectedIds = new Set(selectedItems.map((i) => i.id));
 
-      const nextStrokes = strokes.map((s) => {
+      const nextStrokes = strokesRef.current.map((s) => {
         if (selectedIds.has(s.id)) {
           changed = true;
           return { ...s, color: newColor };
@@ -732,8 +909,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
       });
 
       if (changed) {
+        strokesRef.current = nextStrokes;
         setStrokes(nextStrokes);
-        pushHistory(nextStrokes, texts, images, shapes);
+        pushHistory(nextStrokes, textsRef.current, imagesRef.current, shapesRef.current);
       }
     }
   };
@@ -745,7 +923,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
       let changed = false;
       const selectedIds = new Set(selectedItems.map((i) => i.id));
 
-      const nextTexts = texts.map((t) => {
+      const nextTexts = textsRef.current.map((t) => {
         if (selectedIds.has(t.id)) {
           changed = true;
           return { ...t, color: newColor };
@@ -754,8 +932,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
       });
 
       if (changed) {
+        textsRef.current = nextTexts;
         setTexts(nextTexts);
-        pushHistory(strokes, nextTexts, images, shapes);
+        pushHistory(strokesRef.current, nextTexts, imagesRef.current, shapesRef.current);
       }
     }
   };
@@ -767,7 +946,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
       let changed = false;
       const selectedIds = new Set(selectedItems.map((i) => i.id));
 
-      const nextShapes = shapes.map((s) => {
+      const nextShapes = shapesRef.current.map((s) => {
         if (selectedIds.has(s.id)) {
           changed = true;
           return { ...s, color: newColor };
@@ -776,9 +955,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
       });
 
       if (changed) {
-        setShapes(nextShapes);
         shapesRef.current = nextShapes;
-        pushHistory(strokes, texts, images, nextShapes);
+        setShapes(nextShapes);
+        pushHistory(strokesRef.current, textsRef.current, imagesRef.current, nextShapes);
       }
     }
   };
@@ -788,6 +967,10 @@ export const BoardView: React.FC<BoardViewProps> = ({
     const nextShapes = shapesRef.current.map((s) => (s.id === updated.id ? updated : s));
     setShapes(nextShapes);
     shapesRef.current = nextShapes;
+    if (loadedTaskIdRef.current === taskIdRef.current) {
+      revisionRef.current += 1;
+      isDirtyRef.current = true;
+    }
     if (isFinal) {
       pushHistory(strokesRef.current, textsRef.current, imagesRef.current, nextShapes);
     }
@@ -800,7 +983,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
       let changed = false;
       const selectedIds = new Set(selectedItems.map((i) => i.id));
 
-      const nextTexts = texts.map((t) => {
+      const nextTexts = textsRef.current.map((t) => {
         if (selectedIds.has(t.id)) {
           changed = true;
           return { ...t, fontSize: newSize };
@@ -809,8 +992,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
       });
 
       if (changed) {
+        textsRef.current = nextTexts;
         setTexts(nextTexts);
-        pushHistory(strokes, nextTexts, images);
+        pushHistory(strokesRef.current, nextTexts, imagesRef.current, shapesRef.current);
       }
     }
   };
@@ -822,7 +1006,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
       let changed = false;
       const selectedIds = new Set(selectedItems.map((i) => i.id));
 
-      const nextStrokes = strokes.map((s) => {
+      const nextStrokes = strokesRef.current.map((s) => {
         if (selectedIds.has(s.id)) {
           changed = true;
           return { ...s, width: newWidth };
@@ -831,8 +1015,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
       });
 
       if (changed) {
+        strokesRef.current = nextStrokes;
         setStrokes(nextStrokes);
-        pushHistory(nextStrokes, texts, images);
+        pushHistory(nextStrokes, textsRef.current, imagesRef.current, shapesRef.current);
       }
     }
   };
@@ -899,7 +1084,8 @@ export const BoardView: React.FC<BoardViewProps> = ({
         width: 220,
         height: 38,
       };
-      const nextTexts = [...texts, newText];
+      const nextTexts = [...textsRef.current, newText];
+      textsRef.current = nextTexts;
       setTexts(nextTexts);
       setSelectedItems([{ type: 'text', id: newText.id }]);
       setEditingTextId(newText.id);
@@ -1383,10 +1569,11 @@ export const BoardView: React.FC<BoardViewProps> = ({
           }
         }
 
+        const currentVp = viewportRef.current;
         const cx = containerSize.width / 2;
         const cy = containerSize.height / 2;
-        const worldX = (cx - viewport.x) / viewport.zoom - width / 2;
-        const worldY = (cy - viewport.y) / viewport.zoom - height / 2;
+        const worldX = (cx - currentVp.x) / currentVp.zoom - width / 2;
+        const worldY = (cy - currentVp.y) / currentVp.zoom - height / 2;
 
         const newImage: BoardImageObject = {
           id: `img-${Date.now()}`,
@@ -1398,10 +1585,11 @@ export const BoardView: React.FC<BoardViewProps> = ({
           rotation: 0,
         };
 
-        const nextImages = [...images, newImage];
+        const nextImages = [...imagesRef.current, newImage];
+        imagesRef.current = nextImages;
         setImages(nextImages);
         setSelectedItems([{ type: 'image', id: newImage.id }]);
-        pushHistory(strokes, texts, nextImages);
+        pushHistory(strokesRef.current, textsRef.current, nextImages, shapesRef.current);
         URL.revokeObjectURL(objectUrl);
       };
 
@@ -1420,16 +1608,19 @@ export const BoardView: React.FC<BoardViewProps> = ({
     if (selectedItems.length === 0) return;
     const selectedIds = new Set(selectedItems.map((i) => i.id));
 
-    const nextImages = images.filter((img) => !selectedIds.has(img.id));
-    const nextTexts = texts.filter((txt) => !selectedIds.has(txt.id));
-    const nextStrokes = strokes.filter((strk) => !selectedIds.has(strk.id));
-    const nextShapes = shapes.filter((shp) => !selectedIds.has(shp.id));
+    const nextImages = imagesRef.current.filter((img) => !selectedIds.has(img.id));
+    const nextTexts = textsRef.current.filter((txt) => !selectedIds.has(txt.id));
+    const nextStrokes = strokesRef.current.filter((strk) => !selectedIds.has(strk.id));
+    const nextShapes = shapesRef.current.filter((shp) => !selectedIds.has(shp.id));
 
+    imagesRef.current = nextImages;
+    textsRef.current = nextTexts;
+    strokesRef.current = nextStrokes;
+    shapesRef.current = nextShapes;
     setImages(nextImages);
     setTexts(nextTexts);
     setStrokes(nextStrokes);
     setShapes(nextShapes);
-    shapesRef.current = nextShapes;
     setSelectedItems([]);
     setEditingTextId(null);
     pushHistory(nextStrokes, nextTexts, nextImages, nextShapes);
@@ -1440,6 +1631,10 @@ export const BoardView: React.FC<BoardViewProps> = ({
     const nextImages = imagesRef.current.map((img) => (img.id === updated.id ? updated : img));
     setImages(nextImages);
     imagesRef.current = nextImages;
+    if (loadedTaskIdRef.current === taskIdRef.current) {
+      revisionRef.current += 1;
+      isDirtyRef.current = true;
+    }
     if (isFinal) {
       pushHistory(strokesRef.current, textsRef.current, nextImages, shapesRef.current);
     }
@@ -1450,6 +1645,10 @@ export const BoardView: React.FC<BoardViewProps> = ({
     const nextTexts = textsRef.current.map((t) => (t.id === id ? { ...t, x, y } : t));
     setTexts(nextTexts);
     textsRef.current = nextTexts;
+    if (loadedTaskIdRef.current === taskIdRef.current) {
+      revisionRef.current += 1;
+      isDirtyRef.current = true;
+    }
     if (isFinal) {
       pushHistory(strokesRef.current, nextTexts, imagesRef.current, shapesRef.current);
     }
@@ -1460,6 +1659,10 @@ export const BoardView: React.FC<BoardViewProps> = ({
     const nextStrokes = strokesRef.current.map((s) => (s.id === id ? { ...s, points: newPoints } : s));
     setStrokes(nextStrokes);
     strokesRef.current = nextStrokes;
+    if (loadedTaskIdRef.current === taskIdRef.current) {
+      revisionRef.current += 1;
+      isDirtyRef.current = true;
+    }
     if (isFinal) {
       pushHistory(nextStrokes, textsRef.current, imagesRef.current, shapesRef.current);
     }
@@ -1517,6 +1720,11 @@ export const BoardView: React.FC<BoardViewProps> = ({
       shapesRef.current = nextShapes;
     }
 
+    if (loadedTaskIdRef.current === taskIdRef.current) {
+      revisionRef.current += 1;
+      isDirtyRef.current = true;
+    }
+
     if (isFinal) {
       pushHistory(nextStrokes, nextTexts, nextImages, nextShapes);
     }
@@ -1524,12 +1732,26 @@ export const BoardView: React.FC<BoardViewProps> = ({
 
   // Update text content
   const handleUpdateText = (updated: BoardTextObject, isFinal = true) => {
-    const nextTexts = texts.map((t) => (t.id === updated.id ? updated : t));
+    const nextTexts = textsRef.current.map((t) => (t.id === updated.id ? updated : t));
     setTexts(nextTexts);
     textsRef.current = nextTexts;
-    if (isFinal) {
-      pushHistory(strokes, nextTexts, images, shapesRef.current);
+    if (loadedTaskIdRef.current === taskIdRef.current) {
+      revisionRef.current += 1;
+      isDirtyRef.current = true;
     }
+    if (isFinal) {
+      pushHistory(strokesRef.current, nextTexts, imagesRef.current, shapesRef.current);
+    }
+  };
+
+  const handleBackWithFlush = async () => {
+    await flushBoardSave();
+    onBack();
+  };
+
+  const handleSelectAnotherTaskWithFlush = async () => {
+    await flushBoardSave();
+    onSelectAnotherTask();
   };
 
   // Grid background style calculation
@@ -1608,7 +1830,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
           className="absolute top-4 left-4 z-40 flex items-center gap-2 cursor-default pointer-events-auto"
         >
           <button
-            onClick={onBack}
+            onClick={handleBackWithFlush}
             title="Назад к списку заданий предмета"
             className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#0c0c0c]/90 text-neutral-300 hover:text-white border border-white/[0.12] text-xs font-medium backdrop-blur-md shadow-lg transition-all cursor-pointer"
           >
@@ -1617,7 +1839,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
           </button>
 
           <button
-            onClick={onSelectAnotherTask}
+            onClick={handleSelectAnotherTaskWithFlush}
             title="Сменить задание"
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#0c0c0c]/90 text-neutral-300 hover:text-white border border-white/[0.12] text-xs font-medium backdrop-blur-md shadow-lg transition-all cursor-pointer"
           >
@@ -1803,10 +2025,11 @@ export const BoardView: React.FC<BoardViewProps> = ({
             }}
             onUpdateText={handleUpdateText}
             onDelete={() => {
-              const nextTexts = texts.filter((t) => t.id !== txt.id);
+              const nextTexts = textsRef.current.filter((t) => t.id !== txt.id);
+              textsRef.current = nextTexts;
               setTexts(nextTexts);
               setSelectedItems((prev) => prev.filter((i) => i.id !== txt.id));
-              pushHistory(strokes, nextTexts, images);
+              pushHistory(strokesRef.current, nextTexts, imagesRef.current, shapesRef.current);
             }}
             onFinishEditing={() => setEditingTextId(null)}
             onCommitHistory={commitHistory}

@@ -12,9 +12,41 @@ export function isTauriEnvironment(): boolean {
   );
 }
 
-// Track whether window was maximized before entering fullscreen mode
+export interface NativeWindowState {
+  isMaximized: boolean;
+  isFullscreen: boolean;
+}
+
+// Track whether window was maximized before entering fullscreen mode (fallback if JS API is used)
 let wasMaximizedBeforeFs = false;
 let isWindowTransitionInFlight = false;
+let currentWindowState: NativeWindowState = {
+  isMaximized: false,
+  isFullscreen: false,
+};
+
+const stateListeners = new Set<(state: NativeWindowState) => void>();
+
+function broadcastWindowState(next: NativeWindowState) {
+  currentWindowState = next;
+  stateListeners.forEach((listener) => {
+    try {
+      listener(next);
+    } catch {
+      // Ignore listener errors
+    }
+  });
+}
+
+function triggerPostTransitionLayoutSync() {
+  if (typeof window === 'undefined') return;
+  requestAnimationFrame(() => {
+    window.dispatchEvent(new Event('resize'));
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new Event('resize'));
+    });
+  });
+}
 
 /**
  * Minimizes the native Windows application to taskbar
@@ -22,12 +54,12 @@ let isWindowTransitionInFlight = false;
 export async function nativeMinimize(): Promise<boolean> {
   if (!isTauriEnvironment()) return false;
   try {
-    const win = getCurrentWindow();
-    await win.minimize();
+    await invoke('app_minimize');
     return true;
   } catch {
     try {
-      await invoke('app_minimize');
+      const win = getCurrentWindow();
+      await win.minimize();
       return true;
     } catch {
       return false;
@@ -51,27 +83,35 @@ export async function nativeToggleMaximize(): Promise<boolean> {
   isWindowTransitionInFlight = true;
 
   try {
-    const win = getCurrentWindow();
-    const isFs = await win.isFullscreen();
-    if (isFs) {
+    const nextState = await invoke<NativeWindowState>('app_toggle_maximize');
+    if (nextState && typeof nextState.isFullscreen === 'boolean') {
       wasMaximizedBeforeFs = false;
-      await win.setFullscreen(false);
-      if (await win.isMaximized()) {
-        await win.unmaximize();
-      }
+      broadcastWindowState(nextState);
+      triggerPostTransitionLayoutSync();
       return true;
     }
-
-    const isMax = await win.isMaximized();
-    if (isMax) {
-      await win.unmaximize();
-    } else {
-      await win.maximize();
-    }
-    return true;
   } catch {
+    // Fallback to JS Window API if invoke fails
     try {
-      await invoke('app_toggle_maximize');
+      const win = getCurrentWindow();
+      const isFs = await win.isFullscreen();
+      if (isFs) {
+        wasMaximizedBeforeFs = false;
+        await win.setFullscreen(false);
+        if (await win.isMaximized()) {
+          await win.unmaximize();
+        }
+      } else {
+        const isMax = await win.isMaximized();
+        if (isMax) {
+          await win.unmaximize();
+        } else {
+          await win.maximize();
+        }
+      }
+      const [afterFs, afterMax] = await Promise.all([win.isFullscreen(), win.isMaximized()]);
+      broadcastWindowState({ isMaximized: afterMax, isFullscreen: afterFs });
+      triggerPostTransitionLayoutSync();
       return true;
     } catch {
       return false;
@@ -79,6 +119,8 @@ export async function nativeToggleMaximize(): Promise<boolean> {
   } finally {
     isWindowTransitionInFlight = false;
   }
+
+  return false;
 }
 
 /**
@@ -87,12 +129,12 @@ export async function nativeToggleMaximize(): Promise<boolean> {
 export async function nativeClose(): Promise<boolean> {
   if (!isTauriEnvironment()) return false;
   try {
-    const win = getCurrentWindow();
-    await win.close();
+    await invoke('app_close');
     return true;
   } catch {
     try {
-      await invoke('app_close');
+      const win = getCurrentWindow();
+      await win.close();
       return true;
     } catch {
       return false;
@@ -101,16 +143,18 @@ export async function nativeClose(): Promise<boolean> {
 }
 
 /**
- * Initiates native OS window dragging on mousedown
+ * Initiates native OS window dragging on mousedown (disabled in fullscreen mode)
  */
 export async function nativeStartDragging(): Promise<void> {
   if (!isTauriEnvironment()) return;
+  if (currentWindowState.isFullscreen) return;
   try {
-    const win = getCurrentWindow();
-    await win.startDragging();
+    await invoke('app_start_dragging');
   } catch {
     try {
-      await invoke('app_start_dragging');
+      const win = getCurrentWindow();
+      if (await win.isFullscreen()) return;
+      await win.startDragging();
     } catch {
       // Ignored
     }
@@ -146,7 +190,7 @@ export async function nativeIsFullscreen(): Promise<boolean> {
 }
 
 /**
- * Toggles fullscreen mode smoothly without intermediate unmaximize resizes.
+ * Toggles fullscreen mode smoothly without taskbar black bar or outline artifacts.
  */
 export async function nativeToggleFullscreen(): Promise<boolean> {
   if (!isTauriEnvironment()) {
@@ -162,24 +206,46 @@ export async function nativeToggleFullscreen(): Promise<boolean> {
   isWindowTransitionInFlight = true;
 
   try {
-    const win = getCurrentWindow();
-    const isFs = await win.isFullscreen();
-    if (isFs) {
-      const shouldRestoreMax = wasMaximizedBeforeFs;
-      wasMaximizedBeforeFs = false;
-      await win.setFullscreen(false);
-      if (shouldRestoreMax && !(await win.isMaximized())) {
-        await win.maximize();
-      }
-    } else {
-      const isMax = await win.isMaximized();
-      wasMaximizedBeforeFs = isMax;
-      await win.setFullscreen(true);
+    const nextState = await invoke<NativeWindowState>('app_toggle_fullscreen');
+    if (nextState && typeof nextState.isFullscreen === 'boolean') {
+      broadcastWindowState(nextState);
+      triggerPostTransitionLayoutSync();
+      return true;
     }
-    return true;
   } catch {
+    // Fallback to JS Window API if invoke fails
     try {
-      await invoke('app_toggle_fullscreen');
+      const win = getCurrentWindow();
+      const isFs = await win.isFullscreen();
+      if (isFs) {
+        const shouldRestoreMax = wasMaximizedBeforeFs;
+        await win.setFullscreen(false);
+        const nowFs = await win.isFullscreen();
+        if (!nowFs) {
+          wasMaximizedBeforeFs = false;
+          if (shouldRestoreMax && !(await win.isMaximized())) {
+            await win.maximize();
+          }
+        }
+      } else {
+        const isMax = await win.isMaximized();
+        if (isMax) {
+          await win.unmaximize();
+        }
+        await win.setFullscreen(true);
+        const nowFs = await win.isFullscreen();
+        if (nowFs) {
+          wasMaximizedBeforeFs = isMax;
+        } else {
+          wasMaximizedBeforeFs = false;
+          if (isMax && !(await win.isMaximized())) {
+            await win.maximize();
+          }
+        }
+      }
+      const [afterFs, afterMax] = await Promise.all([win.isFullscreen(), win.isMaximized()]);
+      broadcastWindowState({ isMaximized: afterMax, isFullscreen: afterFs });
+      triggerPostTransitionLayoutSync();
       return true;
     } catch {
       return false;
@@ -187,6 +253,8 @@ export async function nativeToggleFullscreen(): Promise<boolean> {
   } finally {
     isWindowTransitionInFlight = false;
   }
+
+  return false;
 }
 
 /**
@@ -194,7 +262,7 @@ export async function nativeToggleFullscreen(): Promise<boolean> {
  * Guaranteed to stay synchronized with the OS and only emit when state values actually change.
  */
 export function subscribeToWindowState(
-  onChange: (state: { isMaximized: boolean; isFullscreen: boolean }) => void
+  onChange: (state: NativeWindowState) => void
 ): () => void {
   let isDisposed = false;
   let unlistenResize: (() => void) | null = null;
@@ -205,11 +273,17 @@ export function subscribeToWindowState(
 
   const emitIfChanged = (isMax: boolean, isFs: boolean) => {
     if (isDisposed) return;
+    currentWindowState = { isMaximized: isMax, isFullscreen: isFs };
     if (lastMaximized === isMax && lastFullscreen === isFs) return;
     lastMaximized = isMax;
     lastFullscreen = isFs;
     onChange({ isMaximized: isMax, isFullscreen: isFs });
   };
+
+  const directListener = (next: NativeWindowState) => {
+    emitIfChanged(next.isMaximized, next.isFullscreen);
+  };
+  stateListeners.add(directListener);
 
   const syncState = async () => {
     if (isDisposed) return;
@@ -233,9 +307,9 @@ export function subscribeToWindowState(
         } else {
           const isFs = Boolean(document.fullscreenElement);
           const isMax =
-            isFs ||
-            (typeof window !== 'undefined' &&
-              window.innerWidth >= (window.screen?.availWidth ?? 1920) - 20);
+            !isFs &&
+            typeof window !== 'undefined' &&
+            window.innerWidth >= (window.screen?.availWidth ?? 1920) - 20;
           emitIfChanged(isMax, isFs);
         }
       } while (pendingSync && !isDisposed);
@@ -266,11 +340,14 @@ export function subscribeToWindowState(
     window.addEventListener('resize', syncState);
   }
 
+  window.addEventListener('focus', syncState);
   document.addEventListener('fullscreenchange', syncState);
 
   return () => {
     isDisposed = true;
+    stateListeners.delete(directListener);
     window.removeEventListener('resize', syncState);
+    window.removeEventListener('focus', syncState);
     document.removeEventListener('fullscreenchange', syncState);
     if (unlistenResize) unlistenResize();
   };
