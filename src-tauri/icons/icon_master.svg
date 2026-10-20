@@ -22,8 +22,8 @@
   <!-- Squircle rounded background for desktop shortcut icon / app avatar -->
   <rect x="16" y="16" width="480" height="480" rx="112" ry="112" fill="url(#bgGrad)" stroke="#27272a" stroke-width="4"/>
 
-  <!-- Persona Stylized Profile Emblem: optically centered -->
-  <g transform="translate(68, 62) scale(3.68)" filter="url(#subtleShadow)">
+  <!-- Persona Stylized Profile Emblem: perfectly geometrically centered -->
+  <g transform="translate(41, 46) scale(3.68)" filter="url(#subtleShadow)">
     <!-- Outer head arch with forehead, nose slope, tip, and indent -->
     <path
       d="M 23 58 C 23 34 38 20 60 20 C 72 20 81 27 86 38 L 94 56 L 81 56"

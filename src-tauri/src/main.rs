@@ -14,9 +14,11 @@ fn app_minimize(window: tauri::Window) {
 fn app_toggle_maximize(window: tauri::Window) {
     // If currently in fullscreen mode, cleanly exit fullscreen and restore to normal window
     if let Ok(true) = window.is_fullscreen() {
-        let _ = window.set_fullscreen(false);
-        let _ = window.unmaximize();
         WAS_MAXIMIZED_BEFORE_FS.store(false, Ordering::SeqCst);
+        let _ = window.set_fullscreen(false);
+        if window.is_maximized().unwrap_or(false) {
+            let _ = window.unmaximize();
+        }
         return;
     }
 
@@ -45,17 +47,14 @@ fn app_start_dragging(window: tauri::Window) {
 fn app_toggle_fullscreen(window: tauri::Window) {
     if let Ok(is_fullscreen) = window.is_fullscreen() {
         if is_fullscreen {
+            let should_restore_max = WAS_MAXIMIZED_BEFORE_FS.swap(false, Ordering::SeqCst);
             let _ = window.set_fullscreen(false);
-            if WAS_MAXIMIZED_BEFORE_FS.load(Ordering::SeqCst) {
+            if should_restore_max && !window.is_maximized().unwrap_or(false) {
                 let _ = window.maximize();
             }
         } else {
             let is_max = window.is_maximized().unwrap_or(false);
             WAS_MAXIMIZED_BEFORE_FS.store(is_max, Ordering::SeqCst);
-            // On Windows undecorated windows, unmaximize before fullscreen ensures zero black bar artifacts at taskbar
-            if is_max {
-                let _ = window.unmaximize();
-            }
             let _ = window.set_fullscreen(true);
         }
     } else {

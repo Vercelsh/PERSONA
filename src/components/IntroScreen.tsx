@@ -29,7 +29,8 @@ export const IntroScreen: React.FC<IntroScreenProps> = ({ onComplete }) => {
       onComplete();
     }, 3600);
 
-    const handleKeyDown = () => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'F11') return;
       onComplete();
     };
 

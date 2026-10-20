@@ -41,7 +41,13 @@ export default function App() {
   });
 
   useEffect(() => {
-    return subscribeToWindowState(setWindowState);
+    return subscribeToWindowState((next) => {
+      setWindowState((prev) =>
+        prev.isMaximized === next.isMaximized && prev.isFullscreen === next.isFullscreen
+          ? prev
+          : next
+      );
+    });
   }, []);
 
   // Navigation
@@ -97,6 +103,7 @@ export default function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'F11') {
         e.preventDefault();
+        if (e.repeat) return;
         nativeToggleFullscreen();
       }
     };
