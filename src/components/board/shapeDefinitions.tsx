@@ -30,8 +30,10 @@ export const SHAPE_DEFINITIONS: ShapeDefinition[] = [
   { type: 'arrow-up', label: 'Стрелка вверх', defaultWidth: 36, defaultHeight: 160 },
   { type: 'arrow-down', label: 'Стрелка вниз', defaultWidth: 36, defaultHeight: 160 },
   { type: 'line-h', label: 'Линия горизонтальная', defaultWidth: 160, defaultHeight: 32 },
+  { type: 'line-v', label: 'Линия вертикальная', defaultWidth: 32, defaultHeight: 160 },
   { type: 'line-slash', label: 'Диагональ (/)', defaultWidth: 120, defaultHeight: 120 },
   { type: 'line-backslash', label: 'Диагональ (\\)', defaultWidth: 120, defaultHeight: 120 },
+  { type: 'line-custom', label: 'Произвольная прямая линия', defaultWidth: 160, defaultHeight: 28 },
 ];
 
 export const SHAPE_MAP = new Map<ShapeType, ShapeDefinition>(
@@ -43,16 +45,18 @@ export const getShapeDefinition = (type: ShapeType): ShapeDefinition => {
 };
 
 /**
- * Renders the SVG content for a given shape at target dimensions
+ * Renders the SVG content for a given shape at target world dimensions (width, height)
+ * and effective screen strokeWidth.
  */
 export const renderShapeSvg = (
   type: ShapeType,
   width: number,
   height: number,
   color: string,
-  strokeWidth: number = 2.5
+  strokeWidth: number = 2.5,
+  worldStrokePadding: number = 2.5
 ): React.ReactNode => {
-  const p = Math.max(2, strokeWidth / 2); // padding to prevent stroke clipping
+  const p = Math.max(2, worldStrokePadding / 2); // padding in world coordinates to prevent stroke clipping
   const w = Math.max(10, width);
   const h = Math.max(10, height);
   const innerW = Math.max(2, w - p * 2);
@@ -180,8 +184,8 @@ export const renderShapeSvg = (
       // Oblique 3D cube
       const ox = w * 0.28;
       const oy = h * 0.28;
-      const fw = w - ox - p * 2;
-      const fh = h - oy - p * 2;
+      const fw = Math.max(2, w - ox - p * 2);
+      const fh = Math.max(2, h - oy - p * 2);
       const fx = p;
       const fy = p + oy;
 
@@ -383,12 +387,27 @@ export const renderShapeSvg = (
     }
 
     case 'line-h':
+    case 'line-custom':
       return (
         <line
           x1={p}
           y1={h / 2}
           x2={w - p}
           y2={h / 2}
+          stroke={color}
+          strokeWidth={strokeWidth}
+          strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
+        />
+      );
+
+    case 'line-v':
+      return (
+        <line
+          x1={w / 2}
+          y1={p}
+          x2={w / 2}
+          y2={h - p}
           stroke={color}
           strokeWidth={strokeWidth}
           strokeLinecap="round"
@@ -430,24 +449,34 @@ export const renderShapeSvg = (
 };
 
 /**
- * Full SVG component for drawing shapes on the board
+ * Full SVG component for drawing shapes on the board.
+ * Scales stroke thickness proportionally with camera zoom so contours never bloat at 15% zoom
+ * and never become overly thin when zooming in, while preserving uniform stroke width across
+ * non-square aspect ratios via vectorEffect="non-scaling-stroke".
  */
 export const renderShapeSVG = (
   type: ShapeType,
   color: string,
   width: number | string = '100%',
   height: number | string = '100%',
-  strokeWidth: number = 2.5
+  strokeWidth: number = 2.5,
+  viewBoxWidth: number = 100,
+  viewBoxHeight: number = 100,
+  zoom: number = 1
 ): React.ReactNode => {
+  const vbW = Math.max(10, viewBoxWidth);
+  const vbH = Math.max(10, viewBoxHeight);
+  const effectiveStrokeWidth = Math.max(0.35, strokeWidth * zoom);
+
   return (
     <svg
       width={width}
       height={height}
-      viewBox="0 0 100 100"
+      viewBox={`0 0 ${vbW} ${vbH}`}
       preserveAspectRatio="none"
       className="w-full h-full overflow-visible"
     >
-      {renderShapeSvg(type, 100, 100, color, strokeWidth)}
+      {renderShapeSvg(type, vbW, vbH, color, effectiveStrokeWidth, strokeWidth)}
     </svg>
   );
 };
@@ -537,10 +566,14 @@ export const ShapeIcon: React.FC<{ type: ShapeType; className?: string }> = ({
             );
           case 'line-h':
             return <line x1="3" y1="12" x2="21" y2="12" />;
+          case 'line-v':
+            return <line x1="12" y1="3" x2="12" y2="21" />;
           case 'line-slash':
             return <line x1="4" y1="20" x2="20" y2="4" />;
           case 'line-backslash':
             return <line x1="4" y1="4" x2="20" y2="20" />;
+          case 'line-custom':
+            return <line x1="4" y1="20" x2="20" y2="4" strokeDasharray="3 3" />;
           default:
             return <rect x="4" y="4" width="16" height="16" />;
         }

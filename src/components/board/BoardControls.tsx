@@ -94,14 +94,35 @@ export const BoardControls: React.FC<BoardControlsProps> = ({
     const strokeInitialW = Math.max(16, initialStrokeMaxX - initialStrokeMinX + initialStrokePadding * 2);
     const strokeInitialH = Math.max(16, initialStrokeMaxY - initialStrokeMinY + initialStrokePadding * 2);
 
-    // Center in screen coords for smooth rotation
+    // Convert shape and image centers from board coordinates to window client coordinates (matching e.clientX / e.clientY)
+    const viewportEl = (e.currentTarget as HTMLElement).closest('.board-viewport');
+    const viewportRect = viewportEl ? viewportEl.getBoundingClientRect() : null;
+    const viewportOffsetX = viewportRect ? viewportRect.left : 0;
+    const viewportOffsetY = viewportRect ? viewportRect.top : 0;
+
     const centerX = initialImage ? initialImage.x + initialImage.width / 2 : 0;
     const centerY = initialImage ? initialImage.y + initialImage.height / 2 : 0;
-    const screenCenterX = centerX * zoom + viewportX;
-    const screenCenterY = centerY * zoom + viewportY;
+    const screenCenterX = viewportOffsetX + centerX * zoom + viewportX;
+    const screenCenterY = viewportOffsetY + centerY * zoom + viewportY;
 
     const initialPointerAngle = Math.atan2(startClientY - screenCenterY, startClientX - screenCenterX);
     const initialImageRotation = initialImage?.rotation || 0;
+
+    // Exact center of the shape in window client coordinates (matches CSS transformOrigin: 'center center')
+    const shapeScreenX = initialShape ? initialShape.x * zoom + viewportX : 0;
+    const shapeScreenY = initialShape ? initialShape.y * zoom + viewportY : 0;
+    const shapeScreenW = initialShape ? Math.max(1, initialShape.width * zoom) : 0;
+    const shapeScreenH = initialShape ? Math.max(1, initialShape.height * zoom) : 0;
+    const shapeClientCenterX = viewportOffsetX + shapeScreenX + shapeScreenW / 2;
+    const shapeClientCenterY = viewportOffsetY + shapeScreenY + shapeScreenH / 2;
+
+    const initialShapePointerAngle = Math.atan2(
+      startClientY - shapeClientCenterY,
+      startClientX - shapeClientCenterX
+    );
+    const initialShapeRotation = initialShape?.rotation || 0;
+    let lastShapePointerAngle = initialShapePointerAngle;
+    let shapeRotationTurns = 0;
 
     const initialImages = activeSelectedItems
       .filter((i) => i.type === 'image')
@@ -119,7 +140,14 @@ export const BoardControls: React.FC<BoardControlsProps> = ({
       .filter((i) => i.type === 'shape')
       .map((i) => {
         const shp = shapes.find((s) => s.id === i.id);
-        return { id: i.id, x: shp?.x || 0, y: shp?.y || 0, width: shp?.width || 120, height: shp?.height || 120 };
+        return {
+          id: i.id,
+          x: shp?.x || 0,
+          y: shp?.y || 0,
+          width: shp?.width || 120,
+          height: shp?.height || 120,
+          rotation: shp?.rotation || 0,
+        };
       });
     const initialStrokes = activeSelectedItems
       .filter((i) => i.type === 'stroke')
@@ -155,10 +183,17 @@ export const BoardControls: React.FC<BoardControlsProps> = ({
       }
     }
     for (const shp of initialShapes) {
-      groupMinX = Math.min(groupMinX, shp.x);
-      groupMinY = Math.min(groupMinY, shp.y);
-      groupMaxX = Math.max(groupMaxX, shp.x + shp.width);
-      groupMaxY = Math.max(groupMaxY, shp.y + shp.height);
+      const cx = shp.x + shp.width / 2;
+      const cy = shp.y + shp.height / 2;
+      const rad = ((shp.rotation || 0) * Math.PI) / 180;
+      const cos = Math.abs(Math.cos(rad));
+      const sin = Math.abs(Math.sin(rad));
+      const halfW = (shp.width * cos + shp.height * sin) / 2;
+      const halfH = (shp.width * sin + shp.height * cos) / 2;
+      groupMinX = Math.min(groupMinX, cx - halfW);
+      groupMinY = Math.min(groupMinY, cy - halfH);
+      groupMaxX = Math.max(groupMaxX, cx + halfW);
+      groupMaxY = Math.max(groupMaxY, cy + halfH);
     }
     for (const img of initialImages) {
       const imgObj = images.find((i) => i.id === img.id);
@@ -182,7 +217,7 @@ export const BoardControls: React.FC<BoardControlsProps> = ({
       const dx = (ev.clientX - startClientX) / zoom;
       const dy = (ev.clientY - startClientY) / zoom;
 
-      if (Math.hypot(dx, dy) > 1.5) {
+      if (Math.hypot(ev.clientX - startClientX, ev.clientY - startClientY) > 1.5 || Math.hypot(dx, dy) > 1.5) {
         hasMoved = true;
       }
 
@@ -236,10 +271,34 @@ export const BoardControls: React.FC<BoardControlsProps> = ({
 
         onUpdateStrokePoints(initialStroke.id, newPoints, false);
       }
-      // 2c. Resize Single Shape via single bottom-right handle (1:1 cursor binding)
+      // 2c. Resize Single Shape via single bottom-right handle (rotation-aware 1:1 cursor binding)
       else if (mode === 'resize-shape' && initialShape) {
-        let targetW = Math.max(16, Math.round(initialShape.width + dx));
-        let targetH = Math.max(16, Math.round(initialShape.height + dy));
+        const rotRad = ((initialShape.rotation || 0) * Math.PI) / 180;
+        const cos = Math.cos(rotRad);
+        const sin = Math.sin(rotRad);
+
+        // Project world delta (dx, dy) onto shape's local axes
+        const localDx = dx * cos + dy * sin;
+        const localDy = -dx * sin + dy * cos;
+
+        const isThinHorizontal =
+          initialShape.type === 'line-h' ||
+          initialShape.type === 'line-custom' ||
+          initialShape.type === 'arrow-right' ||
+          initialShape.type === 'arrow-left';
+        const isThinVertical =
+          initialShape.type === 'line-v' ||
+          initialShape.type === 'arrow-up' ||
+          initialShape.type === 'arrow-down';
+
+        let targetW = Math.max(16, Math.round(initialShape.width + localDx));
+        let targetH = Math.max(16, Math.round(initialShape.height + localDy));
+
+        if (isThinHorizontal && initialShape.type === 'line-custom') {
+          targetH = initialShape.height;
+        } else if (isThinVertical && initialShape.type === 'line-v') {
+          targetW = initialShape.width;
+        }
 
         const isAspectLocked = initialShape.type === 'square' || initialShape.type === 'circle';
         if (isAspectLocked) {
@@ -248,11 +307,61 @@ export const BoardControls: React.FC<BoardControlsProps> = ({
           targetH = maxDim;
         }
 
+        // Keep the top-left corner of the rotated shape anchored in world space while resizing bottom-right
+        const dw = targetW - initialShape.width;
+        const dh = targetH - initialShape.height;
+        const newX = Math.round(initialShape.x + (dw / 2) * (cos - 1) - (dh / 2) * sin);
+        const newY = Math.round(initialShape.y + (dw / 2) * sin + (dh / 2) * (cos - 1));
+
         onUpdateShape?.(
           {
             ...initialShape,
+            x: newX,
+            y: newY,
             width: targetW,
             height: targetH,
+          },
+          false
+        );
+      }
+      // 2d. Smooth Rotation of Single Shape
+      else if (mode === 'rotate-shape' && initialShape) {
+        const vecX = ev.clientX - shapeClientCenterX;
+        const vecY = ev.clientY - shapeClientCenterY;
+
+        // Avoid atan2 singularity if pointer passes directly over the exact center pixel
+        if (Math.hypot(vecX, vecY) < 4) {
+          return;
+        }
+
+        const currentPointerAngle = Math.atan2(vecY, vecX);
+        const stepDiff = currentPointerAngle - lastShapePointerAngle;
+        if (stepDiff > Math.PI) {
+          shapeRotationTurns -= 1;
+        } else if (stepDiff < -Math.PI) {
+          shapeRotationTurns += 1;
+        }
+        lastShapePointerAngle = currentPointerAngle;
+
+        const totalDeltaRad =
+          currentPointerAngle - initialShapePointerAngle + shapeRotationTurns * Math.PI * 2;
+        const deltaDeg = (totalDeltaRad * 180) / Math.PI;
+
+        let newRotation = initialShapeRotation + deltaDeg;
+        if (ev.shiftKey) {
+          newRotation = Math.round(newRotation / 15) * 15;
+        } else {
+          newRotation = Math.round(newRotation * 100) / 100;
+        }
+
+        // Normalize angle to (-180, 180]
+        while (newRotation > 180) newRotation -= 360;
+        while (newRotation <= -180) newRotation += 360;
+
+        onUpdateShape?.(
+          {
+            ...initialShape,
+            rotation: newRotation,
           },
           false
         );
@@ -478,10 +587,17 @@ export const BoardControls: React.FC<BoardControlsProps> = ({
       } else if (item.type === 'shape') {
         const shp = shapes.find((s) => s.id === item.id);
         if (shp) {
-          minX = Math.min(minX, shp.x);
-          minY = Math.min(minY, shp.y);
-          maxX = Math.max(maxX, shp.x + shp.width);
-          maxY = Math.max(maxY, shp.y + shp.height);
+          const cx = shp.x + shp.width / 2;
+          const cy = shp.y + shp.height / 2;
+          const rad = ((shp.rotation || 0) * Math.PI) / 180;
+          const cos = Math.abs(Math.cos(rad));
+          const sin = Math.abs(Math.sin(rad));
+          const halfW = (shp.width * cos + shp.height * sin) / 2;
+          const halfH = (shp.width * sin + shp.height * cos) / 2;
+          minX = Math.min(minX, cx - halfW);
+          minY = Math.min(minY, cy - halfH);
+          maxX = Math.max(maxX, cx + halfW);
+          maxY = Math.max(maxY, cy + halfH);
         }
       } else if (item.type === 'image') {
         if (!hasStrokes) {
@@ -740,8 +856,9 @@ export const BoardControls: React.FC<BoardControlsProps> = ({
   if (singleItem?.type === 'shape' && currentShape) {
     const screenX = currentShape.x * zoom + viewportX;
     const screenY = currentShape.y * zoom + viewportY;
-    const screenW = currentShape.width * zoom;
-    const screenH = currentShape.height * zoom;
+    const screenW = Math.max(1, currentShape.width * zoom);
+    const screenH = Math.max(1, currentShape.height * zoom);
+    const rotation = currentShape.rotation || 0;
 
     return (
       <div
@@ -751,6 +868,8 @@ export const BoardControls: React.FC<BoardControlsProps> = ({
           top: screenY,
           width: screenW,
           height: screenH,
+          transform: `rotate(${rotation}deg)`,
+          transformOrigin: 'center center',
         }}
       >
         <div
@@ -758,7 +877,17 @@ export const BoardControls: React.FC<BoardControlsProps> = ({
           className="absolute inset-0 border-2 border-black border-dashed pointer-events-auto rounded cursor-move bg-black/[0.04]"
         />
 
-        {/* Dedicated Delete Button on Top Right (Lowered neatly right above frame) */}
+        {/* Rotation Handle (Above top-center of shape, with vertical stem) */}
+        <div className="absolute -top-9 left-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-auto z-40">
+          <div
+            onPointerDown={(e) => startInteraction('rotate-shape', e)}
+            className="w-3.5 h-3.5 rounded-full bg-white border-2 border-black hover:scale-125 transition-transform cursor-grab active:cursor-grabbing shadow-md"
+            title="Повернуть фигуру (Shift = шаг 15°)"
+          />
+          <div className="w-[1.5px] h-5 bg-black" />
+        </div>
+
+        {/* Dedicated Delete Button on Top Right */}
         <button
           type="button"
           onPointerDown={(e) => {
@@ -782,6 +911,13 @@ export const BoardControls: React.FC<BoardControlsProps> = ({
           className="absolute -bottom-1.5 -right-1.5 w-3.5 h-3.5 bg-white border-2 border-black rounded-full cursor-nwse-resize shadow-sm hover:scale-125 transition-transform z-50 pointer-events-auto"
           title="Изменить размер (потяните)"
         />
+
+        {/* Rotation Indicator Pill */}
+        {Math.round(rotation) !== 0 ? (
+          <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded bg-black text-[9px] font-mono text-white pointer-events-none shadow whitespace-nowrap">
+            {Math.round(rotation)}°
+          </div>
+        ) : null}
       </div>
     );
   }

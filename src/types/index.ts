@@ -79,8 +79,10 @@ export type ShapeType =
   | 'arrow-up'
   | 'arrow-down'
   | 'line-h'
+  | 'line-v'
   | 'line-slash'
-  | 'line-backslash';
+  | 'line-backslash'
+  | 'line-custom';
 
 export interface BoardShapeObject {
   id: string;

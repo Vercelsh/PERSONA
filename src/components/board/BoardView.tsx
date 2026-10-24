@@ -25,7 +25,7 @@ import { BoardTextElement } from './BoardTextElement';
 import { BoardShapeElement } from './BoardShapeElement';
 import { BoardControls } from './BoardControls';
 import { SHAPE_MAP, renderShapeSVG } from './shapeDefinitions';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, CircleHelp } from 'lucide-react';
 
 interface BoardViewProps {
   subject: Subject;
@@ -97,8 +97,31 @@ export const BoardView: React.FC<BoardViewProps> = ({
   const isErasingRef = useRef(false);
   const lastEraserPosRef = useRef<{ x: number; y: number } | null>(null);
 
-  // Shape placement ghost cursor preview
-  const [shapeCursorPos, setShapeCursorPos] = useState<{ x: number; y: number } | null>(null);
+  // Compact expandable bottom hints pill state
+  const [isHintExpanded, setIsHintExpanded] = useState(false);
+
+  // Shape placement ghost cursor preview & two-click custom line draft start point
+  const [isShapeCursorVisible, setIsShapeCursorVisible] = useState(false);
+  const isShapeCursorVisibleRef = useRef(false);
+  const shapeCursorPosRef = useRef<{ x: number; y: number; screenX: number; screenY: number } | null>(null);
+  const [lineDraftStart, setLineDraftStart] = useState<{ x: number; y: number } | null>(null);
+
+  // Direct DOM refs for zero-latency preview updates on pointermove
+  const customLinePreviewLineRef = useRef<SVGLineElement | null>(null);
+  const customLinePreviewStartRef = useRef<SVGCircleElement | null>(null);
+  const customLinePreviewEndRef = useRef<SVGCircleElement | null>(null);
+  const customLineCursorDotRef = useRef<HTMLDivElement | null>(null);
+  const shapeGhostPreviewRef = useRef<HTMLDivElement | null>(null);
+
+  const hideShapeCursorPreview = useCallback(() => {
+    isShapeCursorVisibleRef.current = false;
+    setIsShapeCursorVisible(false);
+  }, []);
+
+  // Clear custom line draft when tool or active shape type changes
+  useEffect(() => {
+    setLineDraftStart(null);
+  }, [activeTool, activeShapeType]);
 
   // History stack
   const [history, setHistory] = useState<
@@ -140,6 +163,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
   // DOM Containers
   const rootRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
+  const breadcrumbRef = useRef<HTMLDivElement | null>(null);
+  const [isBreadcrumbHidden, setIsBreadcrumbHidden] = useState<boolean>(false);
   const [containerSize, setContainerSize] = useState<{ width: number; height: number }>({
     width: window.innerWidth,
     height: window.innerHeight,
@@ -202,20 +228,71 @@ export const BoardView: React.FC<BoardViewProps> = ({
     vpY: 0,
   });
 
-  // Resize listener
+  // Synchronize viewport size and adaptive top bar collision detection via ResizeObserver
+  const evaluateTopBarSpace = useCallback(() => {
+    const containerEl = containerRef.current;
+    if (!containerEl) return;
+
+    const overlayWidth = containerEl.clientWidth;
+    const overlayHeight = containerEl.clientHeight;
+
+    setContainerSize((prev) =>
+      prev.width === overlayWidth && prev.height === overlayHeight
+        ? prev
+        : { width: overlayWidth, height: overlayHeight }
+    );
+
+    const breadcrumbEl = breadcrumbRef.current;
+    const toolbarEl = toolbarRef.current;
+    if (!breadcrumbEl || !toolbarEl) return;
+
+    // offsetWidth returns untransformed layout width (invariant to CSS scale/translate/opacity)
+    const breadcrumbWidth = breadcrumbEl.offsetWidth;
+    const measuredToolbarWidth = toolbarEl.offsetWidth;
+
+    // Account immediately for expected single-row width when switching to tools with inline sub-toolbars
+    const isSingleRowMode = overlayWidth >= 700;
+    let expectedSubToolbarWidth = 0;
+    if (isSingleRowMode) {
+      if (activeTool === 'pen') expectedSubToolbarWidth = 195;
+      else if (activeTool === 'shape') expectedSubToolbarWidth = 180;
+      else if (activeTool === 'text') expectedSubToolbarWidth = 165;
+      else if (activeTool === 'eraser') expectedSubToolbarWidth = eraserMode === 'area' ? 250 : 140;
+      if (selectedItems.length > 0) expectedSubToolbarWidth += 56;
+    }
+    const baseToolbarWidth = 446;
+    const effectiveToolbarWidth = Math.max(
+      measuredToolbarWidth,
+      isSingleRowMode ? baseToolbarWidth + expectedSubToolbarWidth : measuredToolbarWidth
+    );
+
+    // Centered toolbar left edge vs breadcrumb right edge (left-4 = 16px) + 20px safe margin
+    const availableLeftSpace = (overlayWidth - effectiveToolbarWidth) / 2;
+    const requiredLeftSpace = 16 + breadcrumbWidth + 20;
+
+    const shouldHide = breadcrumbWidth > 0 && availableLeftSpace < requiredLeftSpace;
+    setIsBreadcrumbHidden((prev) => (prev === shouldHide ? prev : shouldHide));
+  }, [activeTool, eraserMode, selectedItems.length]);
+
   useEffect(() => {
-    const updateSize = () => {
-      if (containerRef.current) {
-        setContainerSize({
-          width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight,
-        });
-      }
+    evaluateTopBarSpace();
+    window.addEventListener('resize', evaluateTopBarSpace);
+
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => {
+        evaluateTopBarSpace();
+      });
+      if (containerRef.current) observer.observe(containerRef.current);
+      if (toolbarRef.current) observer.observe(toolbarRef.current);
+      if (breadcrumbRef.current) observer.observe(breadcrumbRef.current);
+    }
+
+    return () => {
+      window.removeEventListener('resize', evaluateTopBarSpace);
+      observer?.disconnect();
     };
-    updateSize();
-    window.addEventListener('resize', updateSize);
-    return () => window.removeEventListener('resize', updateSize);
-  }, []);
+  }, [evaluateTopBarSpace, subject.title, task.title, task.taskNumber]);
 
   // Build a consistent snapshot of the current board state with a strictly monotonic timestamp
   const buildBoardSnapshot = useCallback((targetTaskId: string, targetSubjectId: string): BoardState | null => {
@@ -648,6 +725,15 @@ export const BoardView: React.FC<BoardViewProps> = ({
         }
       }
 
+      // Escape cancels two-point custom line draft or deselects
+      if (code === 'Escape' || key === 'escape') {
+        if (lineDraftStart) {
+          e.preventDefault();
+          setLineDraftStart(null);
+          return;
+        }
+      }
+
       // Quick tools shortcuts (works on English and Russian layouts)
       if (code === 'KeyV' || key === 'v' || key === 'м') {
         setActiveTool('select');
@@ -684,7 +770,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [handleUndo, handleRedo, handleZoom, selectedItems]);
+  }, [handleUndo, handleRedo, handleZoom, selectedItems, lineDraftStart]);
 
   // Geometric hit-testing helpers
   function boxIntersectsBox(
@@ -1093,8 +1179,59 @@ export const BoardView: React.FC<BoardViewProps> = ({
       return;
     }
 
-    // 4b. Shape tool: places selected shape at click coordinates
+    // 4b. Shape tool: places selected shape at click coordinates (or two-click line for 'line-custom')
     if (activeTool === 'shape') {
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+
+      if (activeShapeType === 'line-custom') {
+        if (!lineDraftStart) {
+          shapeCursorPosRef.current = { x: boardX, y: boardY, screenX, screenY };
+          isShapeCursorVisibleRef.current = true;
+          setIsShapeCursorVisible(true);
+          setLineDraftStart({ x: boardX, y: boardY });
+          return;
+        } else {
+          const dx = boardX - lineDraftStart.x;
+          const dy = boardY - lineDraftStart.y;
+          const dist = Math.hypot(dx, dy);
+
+          // Ignore accidental double-click on the exact same spot
+          if (dist < 4) {
+            return;
+          }
+
+          const angleDeg = Math.round(((Math.atan2(dy, dx) * 180) / Math.PI) * 10) / 10;
+          const lineThicknessBox = 28;
+          const width = Math.max(20, Math.round(dist));
+          const midX = (lineDraftStart.x + boardX) / 2;
+          const midY = (lineDraftStart.y + boardY) / 2;
+
+          const newShape: BoardShapeObject = {
+            id: `shp-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            type: 'line-custom',
+            x: Math.round(midX - width / 2),
+            y: Math.round(midY - lineThicknessBox / 2),
+            width,
+            height: lineThicknessBox,
+            color: shapeColor,
+            strokeWidth: 2.5,
+            rotation: angleDeg,
+          };
+
+          const nextShapes = [...shapesRef.current, newShape];
+          shapesRef.current = nextShapes;
+          setShapes(nextShapes);
+          setSelectedItems([{ type: 'shape', id: newShape.id }]);
+          setLineDraftStart(null);
+          shapeCursorPosRef.current = null;
+          hideShapeCursorPreview();
+          setActiveTool('select');
+          pushHistory(strokesRef.current, textsRef.current, imagesRef.current, nextShapes);
+          return;
+        }
+      }
+
       const shapeDef = SHAPE_MAP.get(activeShapeType);
       const defW = shapeDef ? shapeDef.defaultWidth : 120;
       const defH = shapeDef ? shapeDef.defaultHeight : 120;
@@ -1107,14 +1244,16 @@ export const BoardView: React.FC<BoardViewProps> = ({
         height: defH,
         color: shapeColor,
         strokeWidth: 2.5,
+        rotation: 0,
       };
-      const nextShapes = [...shapes, newShape];
-      setShapes(nextShapes);
+      const nextShapes = [...shapesRef.current, newShape];
       shapesRef.current = nextShapes;
+      setShapes(nextShapes);
       setSelectedItems([{ type: 'shape', id: newShape.id }]);
       setActiveTool('select');
-      setShapeCursorPos(null);
-      pushHistory(strokes, texts, images, nextShapes);
+      shapeCursorPosRef.current = null;
+      hideShapeCursorPreview();
+      pushHistory(strokesRef.current, textsRef.current, imagesRef.current, nextShapes);
       return;
     }
 
@@ -1191,9 +1330,39 @@ export const BoardView: React.FC<BoardViewProps> = ({
       return;
     }
 
-    // 3b. Shape placement cursor
+    // 3b. Shape placement cursor (synchronous DOM update to avoid React re-render lag)
     if (activeTool === 'shape') {
-      setShapeCursorPos({ x: boardX, y: boardY });
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+      shapeCursorPosRef.current = { x: boardX, y: boardY, screenX, screenY };
+
+      if (!isShapeCursorVisibleRef.current) {
+        isShapeCursorVisibleRef.current = true;
+        setIsShapeCursorVisible(true);
+      }
+
+      if (activeShapeType === 'line-custom') {
+        if (lineDraftStart) {
+          const startScreenX = lineDraftStart.x * viewport.zoom + viewport.x;
+          const startScreenY = lineDraftStart.y * viewport.zoom + viewport.y;
+          customLinePreviewLineRef.current?.setAttribute('x1', String(startScreenX));
+          customLinePreviewLineRef.current?.setAttribute('y1', String(startScreenY));
+          customLinePreviewLineRef.current?.setAttribute('x2', String(screenX));
+          customLinePreviewLineRef.current?.setAttribute('y2', String(screenY));
+          customLinePreviewStartRef.current?.setAttribute('cx', String(startScreenX));
+          customLinePreviewStartRef.current?.setAttribute('cy', String(startScreenY));
+          customLinePreviewEndRef.current?.setAttribute('cx', String(screenX));
+          customLinePreviewEndRef.current?.setAttribute('cy', String(screenY));
+        } else if (customLineCursorDotRef.current) {
+          customLineCursorDotRef.current.style.left = `${screenX}px`;
+          customLineCursorDotRef.current.style.top = `${screenY}px`;
+        }
+      } else if (shapeGhostPreviewRef.current) {
+        const defW = (SHAPE_MAP.get(activeShapeType)?.defaultWidth || 120) * viewport.zoom;
+        const defH = (SHAPE_MAP.get(activeShapeType)?.defaultHeight || 120) * viewport.zoom;
+        shapeGhostPreviewRef.current.style.left = `${screenX - defW / 2}px`;
+        shapeGhostPreviewRef.current.style.top = `${screenY - defH / 2}px`;
+      }
     }
 
     // 4. Marquee selection move
@@ -1282,9 +1451,16 @@ export const BoardView: React.FC<BoardViewProps> = ({
           }
         });
 
-        // 4. Check Shapes
+        // 4. Check Shapes (rotation-aware bounding box)
         shapes.forEach((shp) => {
-          if (boxIntersectsBox(x1, y1, x2, y2, shp.x, shp.y, shp.x + shp.width, shp.y + shp.height)) {
+          const cx = shp.x + shp.width / 2;
+          const cy = shp.y + shp.height / 2;
+          const rad = ((shp.rotation || 0) * Math.PI) / 180;
+          const cos = Math.abs(Math.cos(rad));
+          const sin = Math.abs(Math.sin(rad));
+          const halfW = (shp.width * cos + shp.height * sin) / 2;
+          const halfH = (shp.width * sin + shp.height * cos) / 2;
+          if (boxIntersectsBox(x1, y1, x2, y2, cx - halfW, cy - halfH, cx + halfW, cy + halfH)) {
             matched.push({ type: 'shape', id: shp.id });
           }
         });
@@ -1299,7 +1475,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
 
   const handlePointerLeave = () => {
     setEraserCursorPos(null);
-    setShapeCursorPos(null);
+    if (!lineDraftStart) {
+      hideShapeCursorPreview();
+    }
   };
 
   // Eraser Mode 1: Erase whole object/stroke on click/touch
@@ -1321,12 +1499,24 @@ export const BoardView: React.FC<BoardViewProps> = ({
         return;
       }
     }
-    // 2. Check shapes
+    // 2. Check shapes (transform click point into shape's local unrotated coordinates)
     const currentShapes = shapesRef.current;
     for (let i = currentShapes.length - 1; i >= 0; i--) {
       const shp = currentShapes[i];
       const pad = 10;
-      if (x >= shp.x - pad && x <= shp.x + shp.width + pad && y >= shp.y - pad && y <= shp.y + shp.height + pad) {
+      const cx = shp.x + shp.width / 2;
+      const cy = shp.y + shp.height / 2;
+      const rad = -((shp.rotation || 0) * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      const localX = cx + (x - cx) * cos - (y - cy) * sin;
+      const localY = cy + (x - cx) * sin + (y - cy) * cos;
+      if (
+        localX >= shp.x - pad &&
+        localX <= shp.x + shp.width + pad &&
+        localY >= shp.y - pad &&
+        localY <= shp.y + shp.height + pad
+      ) {
         const nextShapes = currentShapes.filter((s) => s.id !== shp.id);
         shapesRef.current = nextShapes;
         setShapes(nextShapes);
@@ -1819,45 +2009,104 @@ export const BoardView: React.FC<BoardViewProps> = ({
           onZoomOut={() => handleZoom(0.83)}
           onResetZoom={() => setViewport({ x: 80, y: 80, zoom: 1 })}
           onPointerEnterToolbar={() => setEraserCursorPos(null)}
+          toolbarRef={toolbarRef}
+          containerWidth={containerSize.width}
         />
 
-        {/* Top Left Navigation Breadcrumb */}
+        {/* Top Left Navigation Breadcrumb (Smoothly hides before colliding with centered toolbar) */}
         <div
+          ref={breadcrumbRef}
+          aria-hidden={isBreadcrumbHidden}
           onPointerDown={(e) => e.stopPropagation()}
           onPointerMove={(e) => e.stopPropagation()}
           onPointerUp={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
-          className="absolute top-4 left-4 z-40 flex items-center gap-2 cursor-default pointer-events-auto"
+          className={`absolute top-4 left-4 z-40 flex items-center gap-2 cursor-default transition-[opacity,transform] duration-200 ease-out will-change-[opacity,transform] ${
+            isBreadcrumbHidden
+              ? 'opacity-0 -translate-x-2 scale-95 pointer-events-none select-none'
+              : 'opacity-100 translate-x-0 scale-100 pointer-events-auto'
+          }`}
         >
           <button
+            tabIndex={isBreadcrumbHidden ? -1 : 0}
             onClick={handleBackWithFlush}
             title="Назад к списку заданий предмета"
-            className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#0c0c0c]/90 text-neutral-300 hover:text-white border border-white/[0.12] text-xs font-medium backdrop-blur-md shadow-lg transition-all cursor-pointer"
+            className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#0c0c0c]/90 text-neutral-300 hover:text-white border border-white/[0.12] text-xs font-medium backdrop-blur-md shadow-lg transition-colors cursor-pointer shrink-0"
           >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            <span className="truncate max-w-[130px] sm:max-w-[180px]">{subject.title}</span>
+            <ArrowLeft className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate max-w-[160px]">{subject.title}</span>
           </button>
 
           <button
+            tabIndex={isBreadcrumbHidden ? -1 : 0}
             onClick={handleSelectAnotherTaskWithFlush}
             title="Сменить задание"
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#0c0c0c]/90 text-neutral-300 hover:text-white border border-white/[0.12] text-xs font-medium backdrop-blur-md shadow-lg transition-all cursor-pointer"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#0c0c0c]/90 text-neutral-300 hover:text-white border border-white/[0.12] text-xs font-medium backdrop-blur-md shadow-lg transition-colors cursor-pointer shrink-0"
           >
-            <span className="font-mono text-white">№ {task.taskNumber}</span>
-            <span className="text-neutral-500 hidden sm:inline">•</span>
-            <span className="truncate max-w-[110px] hidden sm:inline text-neutral-400">
+            <span className="font-mono text-white shrink-0">№ {task.taskNumber}</span>
+            <span className="text-neutral-500 shrink-0">•</span>
+            <span className="truncate max-w-[110px] text-neutral-400">
               {task.title || `Задание ${task.taskNumber}`}
             </span>
           </button>
         </div>
 
-        {/* Bottom Hint Indicator */}
-        <div className="absolute bottom-4 left-4 z-20 pointer-events-none hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#0c0c0c]/80 text-[11px] font-mono text-neutral-400 border border-white/[0.08] shadow-md backdrop-blur-sm cursor-default">
-          <span>Пробел/Колесо: Перемещение</span>
-          <span>•</span>
-          <span>Ctrl + Колесо: Zoom</span>
-          <span>•</span>
-          <span>Ctrl + Z: Отмена</span>
+        {/* Bottom Hint Indicator (Compact Question Icon -> Smoothly Expands on Hover / Focus) */}
+        <div
+          role="button"
+          tabIndex={0}
+          aria-label="Подсказки управления доской"
+          aria-expanded={isHintExpanded}
+          onMouseEnter={() => {
+            setIsHintExpanded(true);
+            setEraserCursorPos(null);
+            if (!lineDraftStart) {
+              hideShapeCursorPreview();
+            }
+          }}
+          onMouseLeave={() => setIsHintExpanded(false)}
+          onFocus={() => setIsHintExpanded(true)}
+          onBlur={() => setIsHintExpanded(false)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsHintExpanded((prev) => !prev);
+            } else if (e.key === 'Escape' && isHintExpanded) {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsHintExpanded(false);
+            }
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerMove={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (e.detail === 0) {
+              setIsHintExpanded((prev) => !prev);
+            }
+          }}
+          className={`group absolute bottom-4 left-4 z-20 pointer-events-auto hidden sm:inline-flex items-center h-8 rounded-xl bg-[#0c0c0c]/85 hover:bg-[#0c0c0c]/95 border border-white/[0.08] hover:border-white/[0.15] shadow-md backdrop-blur-sm cursor-default select-none outline-none focus-visible:border-white/30 transition-[background-color,border-color,box-shadow] duration-250 ease-out`}
+        >
+          <span className="w-8 h-8 flex items-center justify-center shrink-0 text-neutral-400 group-hover:text-neutral-200 transition-colors duration-200">
+            <CircleHelp className="w-4 h-4" />
+          </span>
+          <div
+            className={`grid transition-[grid-template-columns,opacity] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+              isHintExpanded ? 'grid-cols-[1fr] opacity-100' : 'grid-cols-[0fr] opacity-0'
+            }`}
+          >
+            <div className="overflow-hidden">
+              <div className="flex items-center gap-2 pr-3 pl-0.5 whitespace-nowrap text-[11px] font-mono text-neutral-400">
+                <span>Пробел/Колесо: Перемещение</span>
+                <span>•</span>
+                <span>Ctrl + Колесо: Zoom</span>
+                <span>•</span>
+                <span>Ctrl + Z: Отмена</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1955,19 +2204,97 @@ export const BoardView: React.FC<BoardViewProps> = ({
         />
       )}
 
-      {/* Shape Placement Ghost Preview */}
-      {activeTool === 'shape' && shapeCursorPos && (
-        <div
-          className="absolute pointer-events-none z-40 opacity-40 transition-none"
-          style={{
-            left: `${(shapeCursorPos.x - (SHAPE_MAP.get(activeShapeType)?.defaultWidth || 120) / 2) * viewport.zoom + viewport.x}px`,
-            top: `${(shapeCursorPos.y - (SHAPE_MAP.get(activeShapeType)?.defaultHeight || 120) / 2) * viewport.zoom + viewport.y}px`,
-            width: `${(SHAPE_MAP.get(activeShapeType)?.defaultWidth || 120) * viewport.zoom}px`,
-            height: `${(SHAPE_MAP.get(activeShapeType)?.defaultHeight || 120) * viewport.zoom}px`,
-          }}
-        >
-          {renderShapeSVG(activeShapeType, shapeColor, '100%', '100%', 2.5)}
-        </div>
+      {/* Shape Placement Ghost Preview & Two-Point Custom Line Preview */}
+      {activeTool === 'shape' && (isShapeCursorVisible || lineDraftStart) && (
+        activeShapeType === 'line-custom' ? (
+          lineDraftStart ? (
+            <svg
+              className="absolute inset-0 pointer-events-none z-40"
+              width={containerSize.width}
+              height={containerSize.height}
+            >
+              <line
+                ref={customLinePreviewLineRef}
+                x1={lineDraftStart.x * viewport.zoom + viewport.x}
+                y1={lineDraftStart.y * viewport.zoom + viewport.y}
+                x2={
+                  shapeCursorPosRef.current
+                    ? shapeCursorPosRef.current.screenX
+                    : lineDraftStart.x * viewport.zoom + viewport.x
+                }
+                y2={
+                  shapeCursorPosRef.current
+                    ? shapeCursorPosRef.current.screenY
+                    : lineDraftStart.y * viewport.zoom + viewport.y
+                }
+                stroke={shapeColor}
+                strokeWidth={Math.max(0.4, 2.5 * viewport.zoom)}
+                strokeLinecap="round"
+                strokeDasharray="6 4"
+              />
+              <circle
+                ref={customLinePreviewStartRef}
+                cx={lineDraftStart.x * viewport.zoom + viewport.x}
+                cy={lineDraftStart.y * viewport.zoom + viewport.y}
+                r={Math.max(3, 4 * viewport.zoom)}
+                fill={shapeColor}
+              />
+              <circle
+                ref={customLinePreviewEndRef}
+                cx={
+                  shapeCursorPosRef.current
+                    ? shapeCursorPosRef.current.screenX
+                    : lineDraftStart.x * viewport.zoom + viewport.x
+                }
+                cy={
+                  shapeCursorPosRef.current
+                    ? shapeCursorPosRef.current.screenY
+                    : lineDraftStart.y * viewport.zoom + viewport.y
+                }
+                r={Math.max(3, 4 * viewport.zoom)}
+                fill={shapeColor}
+              />
+            </svg>
+          ) : (
+            <div
+              ref={customLineCursorDotRef}
+              className="absolute pointer-events-none z-40 w-2.5 h-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow"
+              style={{
+                left: `${shapeCursorPosRef.current?.screenX ?? -100}px`,
+                top: `${shapeCursorPosRef.current?.screenY ?? -100}px`,
+                backgroundColor: shapeColor,
+              }}
+            />
+          )
+        ) : (
+          <div
+            ref={shapeGhostPreviewRef}
+            className="absolute pointer-events-none z-40 opacity-40 transition-none"
+            style={{
+              left: `${
+                (shapeCursorPosRef.current?.screenX ?? -1000) -
+                ((SHAPE_MAP.get(activeShapeType)?.defaultWidth || 120) * viewport.zoom) / 2
+              }px`,
+              top: `${
+                (shapeCursorPosRef.current?.screenY ?? -1000) -
+                ((SHAPE_MAP.get(activeShapeType)?.defaultHeight || 120) * viewport.zoom) / 2
+              }px`,
+              width: `${(SHAPE_MAP.get(activeShapeType)?.defaultWidth || 120) * viewport.zoom}px`,
+              height: `${(SHAPE_MAP.get(activeShapeType)?.defaultHeight || 120) * viewport.zoom}px`,
+            }}
+          >
+            {renderShapeSVG(
+              activeShapeType,
+              shapeColor,
+              '100%',
+              '100%',
+              2.5,
+              SHAPE_MAP.get(activeShapeType)?.defaultWidth || 120,
+              SHAPE_MAP.get(activeShapeType)?.defaultHeight || 120,
+              viewport.zoom
+            )}
+          </div>
+        )
       )}
 
       {/* Marquee Area Selection DOM Overlay */}
