@@ -183,8 +183,11 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     setEditingEntryId(entry.id);
     const hasSubject = subjects.some((s) => s.id === entry.subjectId);
     setFormSubjectId(hasSubject ? entry.subjectId : subjects[0]?.id || '');
-    setFormHours(entry.durationHours);
-    setFormMinutes(entry.durationMinutes);
+    const safeHours = Math.min(24, Math.max(0, Math.floor(Number(entry.durationHours) || 0)));
+    const safeMinutes =
+      safeHours >= 24 ? 0 : Math.min(59, Math.max(0, Math.floor(Number(entry.durationMinutes) || 0)));
+    setFormHours(safeHours);
+    setFormMinutes(safeMinutes);
     setFormTasks(entry.taskNumbers);
     setFormNotes(entry.notes);
     setIsFormOpen(true);
@@ -195,14 +198,18 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     e.preventDefault();
     if (!formSubjectId) return;
 
+    const safeHours = Math.min(24, Math.max(0, Math.floor(Number(formHours) || 0)));
+    const safeMinutes =
+      safeHours >= 24 ? 0 : Math.min(59, Math.max(0, Math.floor(Number(formMinutes) || 0)));
+
     if (editingEntryId) {
       const existing = entries.find((x) => x.id === editingEntryId);
       if (existing) {
         await onUpdateEntry({
           ...existing,
           subjectId: formSubjectId,
-          durationHours: Number(formHours) || 0,
-          durationMinutes: Number(formMinutes) || 0,
+          durationHours: safeHours,
+          durationMinutes: safeMinutes,
           taskNumbers: formTasks.trim(),
           notes: formNotes.trim(),
           updatedAt: Date.now(),
@@ -212,8 +219,8 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
       await onAddEntry({
         date: selectedDate,
         subjectId: formSubjectId,
-        durationHours: Number(formHours) || 0,
-        durationMinutes: Number(formMinutes) || 0,
+        durationHours: safeHours,
+        durationMinutes: safeMinutes,
         taskNumbers: formTasks.trim(),
         notes: formNotes.trim(),
       });
@@ -548,9 +555,13 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                       min="0"
                       max="24"
                       value={formHours}
-                      onChange={(e) =>
-                        setFormHours(Math.min(24, Math.max(0, parseInt(e.target.value) || 0)))
-                      }
+                      onChange={(e) => {
+                        const nextHours = Math.min(24, Math.max(0, parseInt(e.target.value, 10) || 0));
+                        setFormHours(nextHours);
+                        if (nextHours >= 24) {
+                          setFormMinutes(0);
+                        }
+                      }}
                       className="w-full bg-transparent text-white text-sm focus:outline-none font-mono"
                     />
                     <span className="text-xs text-neutral-500 font-mono">часов</span>
@@ -560,12 +571,17 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                     <input
                       type="number"
                       min="0"
-                      max="59"
-                      value={formMinutes}
-                      onChange={(e) =>
-                        setFormMinutes(Math.min(59, Math.max(0, parseInt(e.target.value) || 0)))
-                      }
-                      className="w-full bg-transparent text-white text-sm focus:outline-none font-mono"
+                      max={formHours >= 24 ? 0 : 59}
+                      disabled={formHours >= 24}
+                      value={formHours >= 24 ? 0 : formMinutes}
+                      onChange={(e) => {
+                        if (formHours >= 24) {
+                          setFormMinutes(0);
+                          return;
+                        }
+                        setFormMinutes(Math.min(59, Math.max(0, parseInt(e.target.value, 10) || 0)));
+                      }}
+                      className="w-full bg-transparent text-white text-sm focus:outline-none font-mono disabled:opacity-40 disabled:cursor-not-allowed"
                     />
                     <span className="text-xs text-neutral-500 font-mono">минут</span>
                   </div>

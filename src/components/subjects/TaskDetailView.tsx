@@ -93,8 +93,12 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
   };
 
   const isMountedRef = useRef(true);
+  const isDeletedRef = useRef(false);
+  const activeTaskIdRef = useRef(task.id);
   const exampleLoadSeqRef = useRef(0);
   const templateLoadSeqRef = useRef(0);
+  const exampleUploadSeqRef = useRef(0);
+  const templateUploadSeqRef = useRef(0);
 
   // Helper to load example Data URL
   const loadExampleBlob = useCallback(async (att: SolutionAttachment | null) => {
@@ -112,11 +116,11 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     if (att.fileId) {
       try {
         const stored = await getFileAttachment(att.fileId);
-        if (!isMountedRef.current || seq !== exampleLoadSeqRef.current) return;
+        if (!isMountedRef.current || isDeletedRef.current || seq !== exampleLoadSeqRef.current) return;
         if (stored && stored.blob) {
           const reader = new FileReader();
           reader.onload = () => {
-            if (isMountedRef.current && seq === exampleLoadSeqRef.current) {
+            if (isMountedRef.current && !isDeletedRef.current && seq === exampleLoadSeqRef.current) {
               setExampleUrl(reader.result as string);
             }
           };
@@ -127,7 +131,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
         console.warn('Не удалось загрузить фото примера:', err);
       }
     }
-    if (isMountedRef.current && seq === exampleLoadSeqRef.current) {
+    if (isMountedRef.current && !isDeletedRef.current && seq === exampleLoadSeqRef.current) {
       setExampleUrl(null);
     }
   }, []);
@@ -148,11 +152,11 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     if (att.fileId) {
       try {
         const stored = await getFileAttachment(att.fileId);
-        if (!isMountedRef.current || seq !== templateLoadSeqRef.current) return;
+        if (!isMountedRef.current || isDeletedRef.current || seq !== templateLoadSeqRef.current) return;
         if (stored && stored.blob) {
           const reader = new FileReader();
           reader.onload = () => {
-            if (isMountedRef.current && seq === templateLoadSeqRef.current) {
+            if (isMountedRef.current && !isDeletedRef.current && seq === templateLoadSeqRef.current) {
               setTemplateUrl(reader.result as string);
             }
           };
@@ -163,7 +167,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
         console.warn('Не удалось загрузить фото шаблона:', err);
       }
     }
-    if (isMountedRef.current && seq === templateLoadSeqRef.current) {
+    if (isMountedRef.current && !isDeletedRef.current && seq === templateLoadSeqRef.current) {
       setTemplateUrl(null);
     }
   }, []);
@@ -173,6 +177,11 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = null;
+    }
+
+    if (isDeletedRef.current) {
+      hasPendingChangesRef.current = false;
+      return;
     }
 
     if (hasPendingChangesRef.current) {
@@ -186,7 +195,9 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
         templateAttachment: curTemplateAtt,
       } = pendingStateRef.current;
 
-      setSaveStatus('saving');
+      if (isMountedRef.current) {
+        setSaveStatus('saving');
+      }
       const updated: TaskItem = {
         ...curTask,
         title: curTitle.trim() || `Задание ${curTask.taskNumber}`,
@@ -197,11 +208,18 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
         updatedAt: Date.now(),
       };
       try {
+        if (isDeletedRef.current) return;
         await onSave(updated);
-        setSaveStatus('saved');
+        if (isMountedRef.current && !isDeletedRef.current) {
+          setSaveStatus('saved');
+        }
       } catch (err) {
-        hasPendingChangesRef.current = true;
-        setSaveStatus('unsaved');
+        if (!isDeletedRef.current) {
+          hasPendingChangesRef.current = true;
+          if (isMountedRef.current) {
+            setSaveStatus('unsaved');
+          }
+        }
         console.error('Ошибка сохранения задания:', err);
       }
     }
@@ -209,6 +227,11 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
 
   // Synchronize when task prop updates
   useEffect(() => {
+    isDeletedRef.current = false;
+    activeTaskIdRef.current = task.id;
+    exampleUploadSeqRef.current++;
+    templateUploadSeqRef.current++;
+
     setTitle(task.title);
     setNotes(task.notes);
     setSolutionText(task.solutionText || '');
@@ -251,6 +274,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     newExampleAtt: SolutionAttachment | null,
     newTemplateAtt: SolutionAttachment | null
   ) => {
+    if (isDeletedRef.current) return;
     hasPendingChangesRef.current = true;
     pendingStateRef.current = {
       task,
@@ -288,11 +312,28 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
 
   // Upload Photo for Example
   const handleExampleFileUpload = async (file: File) => {
-    const prevFileId = exampleAttachment?.fileId;
+    if (isDeletedRef.current) return;
+    const targetTaskId = task.id;
+    const uploadSeq = ++exampleUploadSeqRef.current;
+    const prevFileId = pendingStateRef.current.exampleAttachment?.fileId;
+
+    const isAborted = () =>
+      isDeletedRef.current ||
+      !isMountedRef.current ||
+      activeTaskIdRef.current !== targetTaskId ||
+      uploadSeq !== exampleUploadSeqRef.current;
+
     try {
       const dataUrl = await readFileAsDataUrl(file);
+      if (isAborted()) return;
+
       const fileId = `ex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       await saveFileAttachment(fileId, file, file.name, file.type, file.size);
+
+      if (isAborted()) {
+        await deleteFileAttachment(fileId).catch(() => {});
+        return;
+      }
 
       const newAtt: SolutionAttachment = {
         fileId,
@@ -303,10 +344,22 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
         uploadedAt: Date.now(),
       };
 
+      const {
+        title: curTitle,
+        notes: curNotes,
+        solutionText: curSolutionText,
+        templateAttachment: curTemplateAtt,
+      } = pendingStateRef.current;
+
       setExampleAttachment(newAtt);
       setExampleUrl(dataUrl);
-      triggerAutoSave(title, notes, solutionText, newAtt, templateAttachment);
+      triggerAutoSave(curTitle, curNotes, curSolutionText, newAtt, curTemplateAtt);
       await flushSave();
+
+      if (isDeletedRef.current) {
+        await deleteFileAttachment(fileId).catch(() => {});
+        return;
+      }
 
       if (prevFileId && prevFileId !== fileId) {
         await deleteFileAttachment(prevFileId).catch(() => {});
@@ -322,10 +375,19 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
 
   const handleRemoveExample = async (e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    const prevFileId = exampleAttachment?.fileId;
+    if (isDeletedRef.current) return;
+    exampleUploadSeqRef.current++;
+    const prevFileId = pendingStateRef.current.exampleAttachment?.fileId;
+    const {
+      title: curTitle,
+      notes: curNotes,
+      solutionText: curSolutionText,
+      templateAttachment: curTemplateAtt,
+    } = pendingStateRef.current;
+
     setExampleAttachment(null);
     setExampleUrl(null);
-    triggerAutoSave(title, notes, solutionText, null, templateAttachment);
+    triggerAutoSave(curTitle, curNotes, curSolutionText, null, curTemplateAtt);
     await flushSave();
     if (prevFileId) {
       await deleteFileAttachment(prevFileId).catch(() => {});
@@ -337,11 +399,28 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
 
   // Upload Photo for Template
   const handleTemplateFileUpload = async (file: File) => {
-    const prevFileId = templateAttachment?.fileId;
+    if (isDeletedRef.current) return;
+    const targetTaskId = task.id;
+    const uploadSeq = ++templateUploadSeqRef.current;
+    const prevFileId = pendingStateRef.current.templateAttachment?.fileId;
+
+    const isAborted = () =>
+      isDeletedRef.current ||
+      !isMountedRef.current ||
+      activeTaskIdRef.current !== targetTaskId ||
+      uploadSeq !== templateUploadSeqRef.current;
+
     try {
       const dataUrl = await readFileAsDataUrl(file);
+      if (isAborted()) return;
+
       const fileId = `tpl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       await saveFileAttachment(fileId, file, file.name, file.type, file.size);
+
+      if (isAborted()) {
+        await deleteFileAttachment(fileId).catch(() => {});
+        return;
+      }
 
       const newAtt: SolutionAttachment = {
         fileId,
@@ -352,10 +431,22 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
         uploadedAt: Date.now(),
       };
 
+      const {
+        title: curTitle,
+        notes: curNotes,
+        solutionText: curSolutionText,
+        exampleAttachment: curExampleAtt,
+      } = pendingStateRef.current;
+
       setTemplateAttachment(newAtt);
       setTemplateUrl(dataUrl);
-      triggerAutoSave(title, notes, solutionText, exampleAttachment, newAtt);
+      triggerAutoSave(curTitle, curNotes, curSolutionText, curExampleAtt, newAtt);
       await flushSave();
+
+      if (isDeletedRef.current) {
+        await deleteFileAttachment(fileId).catch(() => {});
+        return;
+      }
 
       if (prevFileId && prevFileId !== fileId) {
         await deleteFileAttachment(prevFileId).catch(() => {});
@@ -371,10 +462,19 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
 
   const handleRemoveTemplate = async (e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    const prevFileId = templateAttachment?.fileId;
+    if (isDeletedRef.current) return;
+    templateUploadSeqRef.current++;
+    const prevFileId = pendingStateRef.current.templateAttachment?.fileId;
+    const {
+      title: curTitle,
+      notes: curNotes,
+      solutionText: curSolutionText,
+      exampleAttachment: curExampleAtt,
+    } = pendingStateRef.current;
+
     setTemplateAttachment(null);
     setTemplateUrl(null);
-    triggerAutoSave(title, notes, solutionText, exampleAttachment, null);
+    triggerAutoSave(curTitle, curNotes, curSolutionText, curExampleAtt, null);
     await flushSave();
     if (prevFileId) {
       await deleteFileAttachment(prevFileId).catch(() => {});
@@ -747,6 +847,9 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
               <button
                 onClick={async () => {
                   setShowDeleteConfirm(false);
+                  isDeletedRef.current = true;
+                  exampleUploadSeqRef.current++;
+                  templateUploadSeqRef.current++;
                   if (saveTimeoutRef.current) {
                     clearTimeout(saveTimeoutRef.current);
                     saveTimeoutRef.current = null;
