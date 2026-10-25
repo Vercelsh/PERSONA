@@ -12,6 +12,7 @@ interface BoardShapeElementProps {
   shape: BoardShapeObject;
   viewport: BoardViewport;
   isInteractive: boolean;
+  zIndex?: number;
   onSelect: (e: React.PointerEvent) => void;
 }
 
@@ -19,6 +20,7 @@ export const BoardShapeElement: React.FC<BoardShapeElementProps> = ({
   shape,
   viewport,
   isInteractive,
+  zIndex,
   onSelect,
 }) => {
   // Convert board coordinate (x, y) to screen pixels without distorting small zoomed-out dimensions
@@ -32,7 +34,7 @@ export const BoardShapeElement: React.FC<BoardShapeElementProps> = ({
     <div
       onPointerDown={isInteractive ? onSelect : undefined}
       className={`absolute select-none ${
-        isInteractive ? 'cursor-pointer pointer-events-auto z-20' : 'pointer-events-none z-10'
+        isInteractive ? 'cursor-pointer pointer-events-auto' : 'pointer-events-none'
       }`}
       style={{
         left: `${screenX}px`,
@@ -42,6 +44,7 @@ export const BoardShapeElement: React.FC<BoardShapeElementProps> = ({
         transform: `rotate(${rotation}deg)`,
         transformOrigin: 'center center',
         touchAction: 'none',
+        zIndex: zIndex ?? (isInteractive ? 20 : 10),
       }}
       data-board-shape-id={shape.id}
     >
@@ -54,7 +57,11 @@ export const BoardShapeElement: React.FC<BoardShapeElementProps> = ({
           shape.strokeWidth || 2.5,
           shape.width,
           shape.height,
-          viewport.zoom
+          viewport.zoom,
+          shape.fillColor,
+          shape.faceFills,
+          shape.erasedFillStrokes,
+          shape.id
         )}
       </div>
     </div>

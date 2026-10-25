@@ -55,7 +55,7 @@ export type MainNavSection = 'subjects' | 'calendar' | 'board';
 // INTERACTIVE BOARD (WHITEBOARD) TYPES
 // ==========================================
 
-export type BoardTool = 'select' | 'pan' | 'pen' | 'eraser' | 'text' | 'image' | 'shape';
+export type BoardTool = 'select' | 'pan' | 'pen' | 'fill' | 'eraser' | 'text' | 'image' | 'shape';
 export type EraserMode = 'object' | 'area';
 
 export type ShapeType =
@@ -84,6 +84,17 @@ export type ShapeType =
   | 'line-backslash'
   | 'line-custom';
 
+export interface BoardPoint {
+  x: number;
+  y: number;
+}
+
+export interface ShapeErasedStroke {
+  points: BoardPoint[]; // normalized [0..1] in shape's local unrotated box
+  radiusRatioX: number; // eraserRadius / shape.width
+  radiusRatioY: number; // eraserRadius / shape.height
+}
+
 export interface BoardShapeObject {
   id: string;
   type: ShapeType;
@@ -94,11 +105,22 @@ export interface BoardShapeObject {
   color: string;
   strokeWidth?: number;
   rotation?: number;
+  fillColor?: string;
+  faceFills?: Record<string, string>;
+  erasedFillStrokes?: ShapeErasedStroke[];
 }
 
-export interface BoardPoint {
-  x: number;
-  y: number;
+export interface StrokeFillRegion {
+  id: string;
+  points: BoardPoint[];
+  color: string;
+  isSmoothCurve?: boolean;
+  boundStrokeIds?: string[];
+}
+
+export interface StrokeErasedPath {
+  points: BoardPoint[];
+  radius: number;
 }
 
 export interface BoardStroke {
@@ -107,6 +129,8 @@ export interface BoardStroke {
   color: string;
   width: number;
   opacity?: number;
+  fillPolygons?: StrokeFillRegion[];
+  erasedFillStrokes?: StrokeErasedPath[];
 }
 
 export interface BoardTextObject {
@@ -146,6 +170,7 @@ export interface BoardState {
   texts: BoardTextObject[];
   images: BoardImageObject[];
   shapes?: BoardShapeObject[];
+  layerOrder?: SelectedItem[];
   viewport: {
     x: number;
     y: number;

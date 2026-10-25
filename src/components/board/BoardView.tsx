@@ -12,6 +12,8 @@ import {
   BoardState,
   BoardPoint,
   SelectedItem,
+  StrokeFillRegion,
+  StrokeErasedPath,
 } from '../../types';
 import {
   getBoardState,
@@ -24,7 +26,14 @@ import { BoardImageElement } from './BoardImageElement';
 import { BoardTextElement } from './BoardTextElement';
 import { BoardShapeElement } from './BoardShapeElement';
 import { BoardControls } from './BoardControls';
-import { SHAPE_MAP, renderShapeSVG } from './shapeDefinitions';
+import { SHAPE_MAP, renderShapeSVG, hitTestShapeFill, worldToShapeLocal } from './shapeDefinitions';
+import {
+  findClosedContourForFill,
+  findStrokeFillRegionAtPoint,
+  isPointInStrokeFill,
+  mapStrokeGeometry,
+  polygonArea,
+} from './fillUtils';
 import { ArrowLeft, CircleHelp } from 'lucide-react';
 
 interface BoardViewProps {
@@ -37,6 +46,89 @@ interface BoardViewProps {
 const DEFAULT_COLOR = '#111111';
 const DEFAULT_STROKE_WIDTH = 3;
 
+function normalizeLayerOrder(
+  images: BoardImageObject[],
+  strokes: BoardStroke[],
+  shapes: BoardShapeObject[],
+  texts: BoardTextObject[],
+  currentOrder?: SelectedItem[]
+): SelectedItem[] {
+  const validKeys = new Set<string>();
+  images.forEach((img) => validKeys.add(`image:${img.id}`));
+  strokes.forEach((strk) => validKeys.add(`stroke:${strk.id}`));
+  shapes.forEach((shp) => validKeys.add(`shape:${shp.id}`));
+  texts.forEach((txt) => validKeys.add(`text:${txt.id}`));
+
+  const result: SelectedItem[] = [];
+  const seen = new Set<string>();
+
+  if (currentOrder && currentOrder.length > 0) {
+    for (let i = 0; i < currentOrder.length; i++) {
+      const item = currentOrder[i];
+      const key = `${item.type}:${item.id}`;
+      if (validKeys.has(key) && !seen.has(key)) {
+        seen.add(key);
+        result.push({ type: item.type, id: item.id });
+      }
+    }
+  }
+
+  images.forEach((img) => {
+    const key = `image:${img.id}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push({ type: 'image', id: img.id });
+    }
+  });
+  strokes.forEach((strk) => {
+    const key = `stroke:${strk.id}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push({ type: 'stroke', id: strk.id });
+    }
+  });
+  shapes.forEach((shp) => {
+    const key = `shape:${shp.id}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push({ type: 'shape', id: shp.id });
+    }
+  });
+  texts.forEach((txt) => {
+    const key = `text:${txt.id}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push({ type: 'text', id: txt.id });
+    }
+  });
+
+  return result;
+}
+
+function getCompositeStrokeGroupIds(strokeId: string, strokes: BoardStroke[]): Set<string> {
+  const boundIds = new Set<string>([strokeId]);
+  const targetStroke = strokes.find((st) => st.id === strokeId);
+  if (targetStroke?.fillPolygons) {
+    targetStroke.fillPolygons.forEach((fp) => {
+      fp.boundStrokeIds?.forEach((bid) => boundIds.add(bid));
+    });
+  }
+  strokes.forEach((st) => {
+    st.fillPolygons?.forEach((fp) => {
+      if (fp.boundStrokeIds?.includes(strokeId)) {
+        boundIds.add(st.id);
+        fp.boundStrokeIds.forEach((bid) => boundIds.add(bid));
+      }
+    });
+  });
+  const existingIds = new Set(strokes.map((st) => st.id));
+  const validBoundIds = new Set<string>();
+  boundIds.forEach((id) => {
+    if (existingIds.has(id)) validBoundIds.add(id);
+  });
+  return validBoundIds;
+}
+
 export const BoardView: React.FC<BoardViewProps> = ({
   subject,
   task,
@@ -47,9 +139,10 @@ export const BoardView: React.FC<BoardViewProps> = ({
   const [activeTool, setActiveTool] = useState<BoardTool>('pen');
   const [penColor, setPenColor] = useState<string>(DEFAULT_COLOR);
   const [strokeWidth, setStrokeWidth] = useState<number>(DEFAULT_STROKE_WIDTH);
+  const [fillColor, setFillColor] = useState<string>(DEFAULT_COLOR);
   const [textColor, setTextColor] = useState<string>(DEFAULT_COLOR);
   const [textFontSize, setTextFontSize] = useState<number>(18);
-  const [activeShapeType, setActiveShapeType] = useState<ShapeType>('rectangle');
+  const [activeShapeType, setActiveShapeType] = useState<ShapeType | null>(null);
   const [shapeColor, setShapeColor] = useState<string>(DEFAULT_COLOR);
   const [eraserMode, setEraserMode] = useState<EraserMode>('area');
   const [eraserRadius, setEraserRadius] = useState<number>(14);
@@ -66,6 +159,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
   const [texts, setTexts] = useState<BoardTextObject[]>([]);
   const [images, setImages] = useState<BoardImageObject[]>([]);
   const [shapes, setShapes] = useState<BoardShapeObject[]>([]);
+  const [layerOrder, setLayerOrder] = useState<SelectedItem[]>([]);
 
   // Selection system
   const [selectedItems, setSelectedItems] = useState<SelectedItem[]>([]);
@@ -88,14 +182,18 @@ export const BoardView: React.FC<BoardViewProps> = ({
   } | null>(null);
   const isMarqueeRef = useRef(false);
 
-  // Drawing state
-  const [currentStroke, setCurrentStroke] = useState<BoardStroke[]>([]);
+  // Drawing state (synchronous canvas rendering for zero-lag pen tracking)
   const activeStrokeRef = useRef<BoardStroke | null>(null);
+  const activePenLivePointRef = useRef<BoardPoint | null>(null);
+  const activePenCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Smooth GPU Eraser cursor (screen coords)
   const [eraserCursorPos, setEraserCursorPos] = useState<{ x: number; y: number } | null>(null);
   const isErasingRef = useRef(false);
   const lastEraserPosRef = useRef<{ x: number; y: number } | null>(null);
+  const activeEraseGestureIdRef = useRef<number>(0);
+  const shapeEraseGestureMapRef = useRef<Map<string, number>>(new Map());
+  const strokeEraseGestureMapRef = useRef<Map<string, number>>(new Map());
 
   // Compact expandable bottom hints pill state
   const [isHintExpanded, setIsHintExpanded] = useState(false);
@@ -121,6 +219,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
   // Clear custom line draft when tool or active shape type changes
   useEffect(() => {
     setLineDraftStart(null);
+    if (activeTool !== 'shape') {
+      setActiveShapeType(null);
+    }
   }, [activeTool, activeShapeType]);
 
   // History stack
@@ -130,6 +231,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
       texts: BoardTextObject[];
       images: BoardImageObject[];
       shapes: BoardShapeObject[];
+      layerOrder?: SelectedItem[];
     }>
   >([]);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
@@ -139,6 +241,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
   const textsRef = useRef(texts);
   const imagesRef = useRef(images);
   const shapesRef = useRef(shapes);
+  const layerOrderRef = useRef(layerOrder);
   const viewportRef = useRef(viewport);
   const subjectIdRef = useRef(subject.id);
   const taskIdRef = useRef(task.id);
@@ -147,6 +250,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
   textsRef.current = texts;
   imagesRef.current = images;
   shapesRef.current = shapes;
+  layerOrderRef.current = layerOrder;
   viewportRef.current = viewport;
   subjectIdRef.current = subject.id;
   taskIdRef.current = task.id;
@@ -255,12 +359,12 @@ export const BoardView: React.FC<BoardViewProps> = ({
     let expectedSubToolbarWidth = 0;
     if (isSingleRowMode) {
       if (activeTool === 'pen') expectedSubToolbarWidth = 195;
-      else if (activeTool === 'shape') expectedSubToolbarWidth = 180;
+      else if (activeTool === 'fill') expectedSubToolbarWidth = 48;
       else if (activeTool === 'text') expectedSubToolbarWidth = 165;
       else if (activeTool === 'eraser') expectedSubToolbarWidth = eraserMode === 'area' ? 250 : 140;
       if (selectedItems.length > 0) expectedSubToolbarWidth += 56;
     }
-    const baseToolbarWidth = 446;
+    const baseToolbarWidth = 482;
     const effectiveToolbarWidth = Math.max(
       measuredToolbarWidth,
       isSingleRowMode ? baseToolbarWidth + expectedSubToolbarWidth : measuredToolbarWidth
@@ -294,6 +398,79 @@ export const BoardView: React.FC<BoardViewProps> = ({
     };
   }, [evaluateTopBarSpace, subject.title, task.title, task.taskNumber]);
 
+  // Synchronous active Pen stroke renderer (bypasses React state & useEffect frame lag)
+  const drawActivePenStroke = useCallback((livePoint?: BoardPoint | null) => {
+    const canvas = activePenCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const containerEl = containerRef.current;
+    const width = containerEl ? containerEl.clientWidth : window.innerWidth;
+    const height = containerEl ? containerEl.clientHeight : window.innerHeight;
+    const dpr = window.devicePixelRatio || 1;
+    const targetW = Math.max(1, Math.round(width * dpr));
+    const targetH = Math.max(1, Math.round(height * dpr));
+
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+    }
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+
+    const stroke = activeStrokeRef.current;
+    if (!stroke || stroke.points.length === 0) return;
+
+    const vp = viewportRef.current;
+    ctx.save();
+    ctx.translate(vp.x, vp.y);
+    ctx.scale(vp.zoom, vp.zoom);
+
+    const basePts = stroke.points;
+    const lastBase = basePts[basePts.length - 1];
+    const tip = livePoint !== undefined ? livePoint : activePenLivePointRef.current;
+    const hasDistinctLiveTip =
+      tip != null &&
+      (Math.abs(tip.x - lastBase.x) > 0.05 || Math.abs(tip.y - lastBase.y) > 0.05);
+    const pts = hasDistinctLiveTip ? [...basePts, tip!] : basePts;
+
+    ctx.beginPath();
+    ctx.strokeStyle = stroke.color;
+    ctx.lineWidth = stroke.width;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.globalAlpha = stroke.opacity ?? 1;
+
+    if (pts.length === 1) {
+      ctx.arc(pts[0].x, pts[0].y, stroke.width / 2, 0, Math.PI * 2);
+      ctx.fillStyle = stroke.color;
+      ctx.fill();
+    } else if (pts.length === 2) {
+      ctx.moveTo(pts[0].x, pts[0].y);
+      ctx.lineTo(pts[1].x, pts[1].y);
+      ctx.stroke();
+    } else {
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length - 1; i++) {
+        const xc = (pts[i].x + pts[i + 1].x) / 2;
+        const yc = (pts[i].y + pts[i + 1].y) / 2;
+        ctx.quadraticCurveTo(pts[i].x, pts[i].y, xc, yc);
+      }
+      const last = pts[pts.length - 1];
+      ctx.lineTo(last.x, last.y);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }, []);
+
+  // Keep active pen canvas synchronized when viewport or container dimensions change, or when committed strokes update
+  useEffect(() => {
+    drawActivePenStroke();
+  }, [viewport.x, viewport.y, viewport.zoom, containerSize.width, containerSize.height, strokes, drawActivePenStroke]);
+
   // Build a consistent snapshot of the current board state with a strictly monotonic timestamp
   const buildBoardSnapshot = useCallback((targetTaskId: string, targetSubjectId: string): BoardState | null => {
     if (loadedTaskIdRef.current !== targetTaskId) {
@@ -316,6 +493,13 @@ export const BoardView: React.FC<BoardViewProps> = ({
       texts: textsRef.current,
       images: imagesRef.current,
       shapes: shapesRef.current,
+      layerOrder: normalizeLayerOrder(
+        imagesRef.current,
+        finalStrokes,
+        shapesRef.current,
+        textsRef.current,
+        layerOrderRef.current
+      ),
       viewport: viewportRef.current,
       updatedAt: nextTimestamp,
     };
@@ -385,12 +569,20 @@ export const BoardView: React.FC<BoardViewProps> = ({
           const loadedTexts = saved.texts || [];
           const loadedImages = saved.images || [];
           const loadedShapes = saved.shapes || [];
+          const loadedLayerOrder = normalizeLayerOrder(
+            loadedImages,
+            loadedStrokes,
+            loadedShapes,
+            loadedTexts,
+            saved.layerOrder
+          );
           const loadedViewport = saved.viewport || { x: 80, y: 80, zoom: 1 };
 
           strokesRef.current = loadedStrokes;
           textsRef.current = loadedTexts;
           imagesRef.current = loadedImages;
           shapesRef.current = loadedShapes;
+          layerOrderRef.current = loadedLayerOrder;
           viewportRef.current = loadedViewport;
 
           lastUpdatedAtRef.current = Math.max(lastUpdatedAtRef.current, saved.updatedAt || 0);
@@ -404,6 +596,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
           setTexts(loadedTexts);
           setImages(loadedImages);
           setShapes(loadedShapes);
+          setLayerOrder(loadedLayerOrder);
           setViewport(loadedViewport);
           setHistory([
             {
@@ -411,6 +604,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
               texts: loadedTexts,
               images: loadedImages,
               shapes: loadedShapes,
+              layerOrder: loadedLayerOrder,
             },
           ]);
           setHistoryIndex(0);
@@ -428,12 +622,14 @@ export const BoardView: React.FC<BoardViewProps> = ({
             });
           }
 
+          const initialLayerOrder = normalizeLayerOrder(initialImages, [], [], []);
           const initialViewport = { x: 80, y: 80, zoom: 1 };
 
           strokesRef.current = [];
           textsRef.current = [];
           imagesRef.current = initialImages;
           shapesRef.current = [];
+          layerOrderRef.current = initialLayerOrder;
           viewportRef.current = initialViewport;
 
           const hasInitialSeededContent = initialImages.length > 0;
@@ -447,6 +643,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
           setTexts([]);
           setImages(initialImages);
           setShapes([]);
+          setLayerOrder(initialLayerOrder);
           setViewport(initialViewport);
           setHistory([
             {
@@ -454,6 +651,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
               texts: [],
               images: initialImages,
               shapes: [],
+              layerOrder: initialLayerOrder,
             },
           ]);
           setHistoryIndex(0);
@@ -490,13 +688,23 @@ export const BoardView: React.FC<BoardViewProps> = ({
       newStrokes: BoardStroke[],
       newTexts: BoardTextObject[],
       newImages: BoardImageObject[],
-      newShapes?: BoardShapeObject[]
+      newShapes?: BoardShapeObject[],
+      newLayerOrder?: SelectedItem[]
     ) => {
       const resolvedShapes = newShapes !== undefined ? newShapes : shapesRef.current;
+      const resolvedLayerOrder = normalizeLayerOrder(
+        newImages,
+        newStrokes,
+        resolvedShapes,
+        newTexts,
+        newLayerOrder !== undefined ? newLayerOrder : layerOrderRef.current
+      );
       strokesRef.current = newStrokes;
       textsRef.current = newTexts;
       imagesRef.current = newImages;
       shapesRef.current = resolvedShapes;
+      layerOrderRef.current = resolvedLayerOrder;
+      setLayerOrder(resolvedLayerOrder);
 
       if (loadedTaskIdRef.current === taskIdRef.current) {
         revisionRef.current += 1;
@@ -510,6 +718,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
           texts: newTexts,
           images: newImages,
           shapes: resolvedShapes,
+          layerOrder: resolvedLayerOrder,
         });
         if (next.length > 50) next.shift();
         return next;
@@ -520,7 +729,13 @@ export const BoardView: React.FC<BoardViewProps> = ({
   );
 
   const commitHistory = useCallback(() => {
-    pushHistory(strokesRef.current, textsRef.current, imagesRef.current, shapesRef.current);
+    pushHistory(
+      strokesRef.current,
+      textsRef.current,
+      imagesRef.current,
+      shapesRef.current,
+      layerOrderRef.current
+    );
   }, [pushHistory]);
 
   // Background auto-save debounce (only after initial load completes for current task)
@@ -559,17 +774,25 @@ export const BoardView: React.FC<BoardViewProps> = ({
         saveTimeoutRef.current = null;
       }
     };
-  }, [strokes, texts, images, shapes, viewport, subject.id, task.id, flushBoardSave]);
+  }, [strokes, texts, images, shapes, layerOrder, viewport, subject.id, task.id, flushBoardSave]);
 
   // Undo / Redo actions
   const handleUndo = useCallback(() => {
     if (historyIndex > 0) {
       const targetState = history[historyIndex - 1];
       const nextShapes = targetState.shapes || [];
+      const nextLayerOrder = normalizeLayerOrder(
+        targetState.images,
+        targetState.strokes,
+        nextShapes,
+        targetState.texts,
+        targetState.layerOrder
+      );
       strokesRef.current = targetState.strokes;
       textsRef.current = targetState.texts;
       imagesRef.current = targetState.images;
       shapesRef.current = nextShapes;
+      layerOrderRef.current = nextLayerOrder;
       if (loadedTaskIdRef.current === taskIdRef.current) {
         revisionRef.current += 1;
         isDirtyRef.current = true;
@@ -579,6 +802,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
       setTexts(targetState.texts);
       setImages(targetState.images);
       setShapes(nextShapes);
+      setLayerOrder(nextLayerOrder);
       setSelectedItems([]);
       setEditingTextId(null);
     }
@@ -588,10 +812,18 @@ export const BoardView: React.FC<BoardViewProps> = ({
     if (historyIndex < history.length - 1) {
       const targetState = history[historyIndex + 1];
       const nextShapes = targetState.shapes || [];
+      const nextLayerOrder = normalizeLayerOrder(
+        targetState.images,
+        targetState.strokes,
+        nextShapes,
+        targetState.texts,
+        targetState.layerOrder
+      );
       strokesRef.current = targetState.strokes;
       textsRef.current = targetState.texts;
       imagesRef.current = targetState.images;
       shapesRef.current = nextShapes;
+      layerOrderRef.current = nextLayerOrder;
       if (loadedTaskIdRef.current === taskIdRef.current) {
         revisionRef.current += 1;
         isDirtyRef.current = true;
@@ -601,6 +833,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
       setTexts(targetState.texts);
       setImages(targetState.images);
       setShapes(nextShapes);
+      setLayerOrder(nextLayerOrder);
       setSelectedItems([]);
       setEditingTextId(null);
     }
@@ -746,6 +979,10 @@ export const BoardView: React.FC<BoardViewProps> = ({
         setActiveTool('pen');
         setSelectedItems([]);
         setEditingTextId(null);
+      } else if (code === 'KeyG' || key === 'g' || key === 'п') {
+        setActiveTool('fill');
+        setSelectedItems([]);
+        setEditingTextId(null);
       } else if (code === 'KeyE' || key === 'e' || key === 'у') {
         setActiveTool('eraser');
         setSelectedItems([]);
@@ -852,23 +1089,107 @@ export const BoardView: React.FC<BoardViewProps> = ({
     return segmentIntersectsBox(p1, p2, x1 - radius, y1 - radius, x2 + radius, y2 + radius);
   }
 
-  const findStrokeAtPoint = (x: number, y: number, threshold = 8): BoardStroke | null => {
-    const currentStrokes = strokesRef.current;
-    for (let i = currentStrokes.length - 1; i >= 0; i--) {
-      const s = currentStrokes[i];
-      const hitRadius = s.width / 2 + threshold;
-      if (s.points.length === 1) {
-        if (Math.hypot(x - s.points[0].x, y - s.points[0].y) <= hitRadius) {
-          return s;
-        }
-        continue;
+  const isStrokeHitAtPoint = (s: BoardStroke, x: number, y: number, threshold = 8): boolean => {
+    const hitRadius = s.width / 2 + threshold;
+    if (s.points.length === 1) {
+      if (Math.hypot(x - s.points[0].x, y - s.points[0].y) <= hitRadius) {
+        return true;
       }
+    } else {
       for (let j = 0; j < s.points.length - 1; j++) {
         const p1 = s.points[j];
         const p2 = s.points[j + 1];
         const dist = distToSegment({ x, y }, p1, p2);
         if (dist <= hitRadius) {
+          return true;
+        }
+      }
+    }
+    if (isPointInStrokeFill(s, x, y)) {
+      return true;
+    }
+    return false;
+  };
+
+  const findStrokeAtPoint = (
+    x: number,
+    y: number,
+    threshold = 8,
+    minLayerIdx = -1
+  ): BoardStroke | null => {
+    const currentStrokes = strokesRef.current;
+    const strokeMap = new Map(currentStrokes.map((s) => [s.id, s]));
+    const order = layerOrderRef.current;
+
+    for (let i = order.length - 1; i > minLayerIdx && i >= 0; i--) {
+      const item = order[i];
+      if (item.type !== 'stroke') continue;
+      const s = strokeMap.get(item.id);
+      if (s && isStrokeHitAtPoint(s, x, y, threshold)) {
+        return s;
+      }
+    }
+
+    if (minLayerIdx < 0) {
+      for (let i = currentStrokes.length - 1; i >= 0; i--) {
+        const s = currentStrokes[i];
+        if (isStrokeHitAtPoint(s, x, y, threshold)) {
           return s;
+        }
+      }
+    }
+    return null;
+  };
+
+  const findTopmostObjectAtPoint = (
+    x: number,
+    y: number,
+    minLayerIdx = -1
+  ): SelectedItem | null => {
+    const order = layerOrderRef.current;
+    const imgMap = new Map(imagesRef.current.map((i) => [i.id, i]));
+    const strkMap = new Map(strokesRef.current.map((s) => [s.id, s]));
+    const shpMap = new Map(shapesRef.current.map((s) => [s.id, s]));
+    const txtMap = new Map(textsRef.current.map((t) => [t.id, t]));
+
+    for (let i = order.length - 1; i > minLayerIdx && i >= 0; i--) {
+      const item = order[i];
+      if (item.type === 'stroke') {
+        const s = strkMap.get(item.id);
+        if (s && isStrokeHitAtPoint(s, x, y, 8)) {
+          return { type: 'stroke', id: s.id };
+        }
+      } else if (item.type === 'text') {
+        const txt = txtMap.get(item.id);
+        if (txt) {
+          const lines = txt.text.split('\n');
+          const maxLineLen = lines.reduce((max, l) => Math.max(max, l.length), 0);
+          const w = txt.width || Math.max(60, maxLineLen * (txt.fontSize * 0.65) + 24);
+          const h = txt.height || Math.max(28, lines.length * (txt.fontSize * 1.3) + 16);
+          if (x >= txt.x && x <= txt.x + w && y >= txt.y && y <= txt.y + h) {
+            return { type: 'text', id: txt.id };
+          }
+        }
+      } else if (item.type === 'shape') {
+        const shp = shpMap.get(item.id);
+        if (shp) {
+          const localPt = worldToShapeLocal(shp, x, y);
+          const pad = 6;
+          if (
+            localPt.x >= -pad &&
+            localPt.x <= shp.width + pad &&
+            localPt.y >= -pad &&
+            localPt.y <= shp.height + pad
+          ) {
+            return { type: 'shape', id: shp.id };
+          }
+        }
+      } else if (item.type === 'image') {
+        const img = imgMap.get(item.id);
+        if (img) {
+          if (x >= img.x && x <= img.x + img.width && y >= img.y && y <= img.y + img.height) {
+            return { type: 'image', id: img.id };
+          }
         }
       }
     }
@@ -885,12 +1206,30 @@ export const BoardView: React.FC<BoardViewProps> = ({
 
     setEditingTextId(null);
 
+    let targetItem = clickedItem;
+    // Because BoardCanvas has pointer-events-none, clicking a stroke that is above an image/shape/text
+    // in Z-order will trigger the DOM element's onPointerDown. Check if a higher-Z-order stroke is at this point.
+    if (clickedItem.type !== 'stroke' && !e.shiftKey) {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (rect) {
+        const boardX = (e.clientX - rect.left - viewport.x) / viewport.zoom;
+        const boardY = (e.clientY - rect.top - viewport.y) / viewport.zoom;
+        const clickedLayerIdx = layerOrderRef.current.findIndex(
+          (item) => item.type === clickedItem.type && item.id === clickedItem.id
+        );
+        const higherStroke = findStrokeAtPoint(boardX, boardY, 8, clickedLayerIdx);
+        if (higherStroke) {
+          targetItem = { type: 'stroke', id: higherStroke.id };
+        }
+      }
+    }
+
     let currentSelected = selectedItems;
     if (e.shiftKey) {
-      if (selectedItems.some((i) => i.id === clickedItem.id)) {
-        currentSelected = selectedItems.filter((i) => i.id !== clickedItem.id);
+      if (selectedItems.some((i) => i.id === targetItem.id)) {
+        currentSelected = selectedItems.filter((i) => i.id !== targetItem.id);
       } else {
-        currentSelected = [...selectedItems, clickedItem];
+        currentSelected = [...selectedItems, targetItem];
       }
       // "Линии + фото = фото НЕ входит в группу"
       if (currentSelected.some((i) => i.type === 'stroke')) {
@@ -899,8 +1238,13 @@ export const BoardView: React.FC<BoardViewProps> = ({
       setSelectedItems(currentSelected);
       if (currentSelected.length === 0) return;
     } else {
-      if (!selectedItems.some((i) => i.id === clickedItem.id)) {
-        currentSelected = [clickedItem];
+      if (!selectedItems.some((i) => i.id === targetItem.id)) {
+        if (targetItem.type === 'stroke') {
+          const boundIds = getCompositeStrokeGroupIds(targetItem.id, strokesRef.current);
+          currentSelected = Array.from(boundIds).map((bid) => ({ type: 'stroke' as const, id: bid }));
+        } else {
+          currentSelected = [targetItem];
+        }
         setSelectedItems(currentSelected);
       }
     }
@@ -930,7 +1274,22 @@ export const BoardView: React.FC<BoardViewProps> = ({
       .filter((i) => i.type === 'stroke')
       .map((i) => {
         const s = strokesRef.current.find((st) => st.id === i.id);
-        return { id: i.id, points: s ? s.points.map((p) => ({ ...p })) : [] };
+        return {
+          id: i.id,
+          points: s ? s.points.map((p) => ({ ...p })) : [],
+          fillPolygons: s?.fillPolygons
+            ? s.fillPolygons.map((fp) => ({
+                ...fp,
+                points: fp.points.map((p) => ({ ...p })),
+              }))
+            : undefined,
+          erasedFillStrokes: s?.erasedFillStrokes
+            ? s.erasedFillStrokes.map((ep) => ({
+                ...ep,
+                points: ep.points.map((p) => ({ ...p })),
+              }))
+            : undefined,
+        };
       });
 
     let hasMoved = false;
@@ -958,10 +1317,16 @@ export const BoardView: React.FC<BoardViewProps> = ({
         x: Math.round(s.x + dx),
         y: Math.round(s.y + dy),
       }));
-      const updatedStrokes = initialStrokes.map((s) => ({
-        id: s.id,
-        points: s.points.map((p) => ({ x: Math.round(p.x + dx), y: Math.round(p.y + dy) })),
-      }));
+      const updatedStrokes = initialStrokes.map((s) =>
+        mapStrokeGeometry(
+          s,
+          (p) => ({
+            x: Math.round((p.x + dx) * 100) / 100,
+            y: Math.round((p.y + dy) * 100) / 100,
+          }),
+          1
+        )
+      );
 
       handleUpdateMultipleAbsolute(updatedImages, updatedTexts, updatedStrokes, updatedShapes, false);
     };
@@ -977,6 +1342,147 @@ export const BoardView: React.FC<BoardViewProps> = ({
 
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
+  };
+
+  // Allows clicking an object that sits higher in Z-order inside the currently selected object's bounding box
+  const handleTrySelectHigherObject = (e: React.PointerEvent): boolean => {
+    if (activeTool !== 'select' || e.shiftKey || selectedItems.length === 0) return false;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return false;
+
+    const boardX = (e.clientX - rect.left - viewport.x) / viewport.zoom;
+    const boardY = (e.clientY - rect.top - viewport.y) / viewport.zoom;
+
+    const selectedKeys = new Set(selectedItems.map((i) => `${i.type}:${i.id}`));
+    let maxSelectedLayerIdx = -1;
+    layerOrderRef.current.forEach((item, idx) => {
+      if (selectedKeys.has(`${item.type}:${item.id}`) && idx > maxSelectedLayerIdx) {
+        maxSelectedLayerIdx = idx;
+      }
+    });
+
+    if (maxSelectedLayerIdx < 0) return false;
+
+    const higherItem = findTopmostObjectAtPoint(boardX, boardY, maxSelectedLayerIdx);
+    if (higherItem && !selectedKeys.has(`${higherItem.type}:${higherItem.id}`)) {
+      startDirectObjectDrag(higherItem, e);
+      return true;
+    }
+    return false;
+  };
+
+  // Determines whether exactly one logical board object is currently selected in Select mode
+  const isSingleObjectSelected = (() => {
+    if (activeTool !== 'select' || selectedItems.length === 0) return false;
+    if (selectedItems.length === 1) return true;
+    if (selectedItems.every((i) => i.type === 'stroke')) {
+      const groupIds = getCompositeStrokeGroupIds(selectedItems[0].id, strokes);
+      if (
+        groupIds.size === selectedItems.length &&
+        selectedItems.every((i) => groupIds.has(i.id))
+      ) {
+        return true;
+      }
+    }
+    return false;
+  })();
+
+  // Moves the currently selected single object one level forward (+1 in Z-order)
+  const handleBringForward = () => {
+    if (!isSingleObjectSelected || selectedItems.length === 0) return;
+
+    const currentOrder = normalizeLayerOrder(
+      imagesRef.current,
+      strokesRef.current,
+      shapesRef.current,
+      textsRef.current,
+      layerOrderRef.current
+    );
+
+    const unitKeys = new Set(selectedItems.map((i) => `${i.type}:${i.id}`));
+    let maxIdx = -1;
+    currentOrder.forEach((item, idx) => {
+      if (unitKeys.has(`${item.type}:${item.id}`) && idx > maxIdx) {
+        maxIdx = idx;
+      }
+    });
+
+    if (maxIdx === -1 || maxIdx >= currentOrder.length - 1) {
+      // Already at the very front of the board
+      return;
+    }
+
+    // Identify the immediately higher object (or composite stroke group) at maxIdx + 1
+    const nextItem = currentOrder[maxIdx + 1];
+    const nextUnitKeys = new Set<string>();
+    if (nextItem.type === 'stroke') {
+      const boundIds = getCompositeStrokeGroupIds(nextItem.id, strokesRef.current);
+      boundIds.forEach((bid) => nextUnitKeys.add(`stroke:${bid}`));
+    } else {
+      nextUnitKeys.add(`${nextItem.type}:${nextItem.id}`);
+    }
+
+    let targetAfterIdx = maxIdx + 1;
+    currentOrder.forEach((item, idx) => {
+      if (nextUnitKeys.has(`${item.type}:${item.id}`) && idx > targetAfterIdx) {
+        targetAfterIdx = idx;
+      }
+    });
+
+    const unitItems = currentOrder.filter((item) => unitKeys.has(`${item.type}:${item.id}`));
+    const nextLayerOrder: SelectedItem[] = [];
+
+    for (let i = 0; i < currentOrder.length; i++) {
+      const item = currentOrder[i];
+      if (unitKeys.has(`${item.type}:${item.id}`)) {
+        continue;
+      }
+      nextLayerOrder.push(item);
+      if (i === targetAfterIdx) {
+        nextLayerOrder.push(...unitItems);
+      }
+    }
+
+    // Synchronize individual arrays' relative order with nextLayerOrder
+    const imgMap = new Map(imagesRef.current.map((im) => [im.id, im]));
+    const strkMap = new Map(strokesRef.current.map((st) => [st.id, st]));
+    const shpMap = new Map(shapesRef.current.map((sh) => [sh.id, sh]));
+    const txtMap = new Map(textsRef.current.map((tx) => [tx.id, tx]));
+
+    const nextImages: BoardImageObject[] = [];
+    const nextStrokes: BoardStroke[] = [];
+    const nextShapes: BoardShapeObject[] = [];
+    const nextTexts: BoardTextObject[] = [];
+
+    nextLayerOrder.forEach((item) => {
+      if (item.type === 'image') {
+        const im = imgMap.get(item.id);
+        if (im) nextImages.push(im);
+      } else if (item.type === 'stroke') {
+        const st = strkMap.get(item.id);
+        if (st) nextStrokes.push(st);
+      } else if (item.type === 'shape') {
+        const sh = shpMap.get(item.id);
+        if (sh) nextShapes.push(sh);
+      } else if (item.type === 'text') {
+        const tx = txtMap.get(item.id);
+        if (tx) nextTexts.push(tx);
+      }
+    });
+
+    imagesRef.current = nextImages;
+    strokesRef.current = nextStrokes;
+    shapesRef.current = nextShapes;
+    textsRef.current = nextTexts;
+    layerOrderRef.current = nextLayerOrder;
+
+    setImages(nextImages);
+    setStrokes(nextStrokes);
+    setShapes(nextShapes);
+    setTexts(nextTexts);
+    setLayerOrder(nextLayerOrder);
+
+    pushHistory(nextStrokes, nextTexts, nextImages, nextShapes, nextLayerOrder);
   };
 
   // Dynamic color changer for Pen (only updates strokes, never text or shapes)
@@ -1108,6 +1614,164 @@ export const BoardView: React.FC<BoardViewProps> = ({
     }
   };
 
+  // Fill tool action at world coordinate (boardX, boardY)
+  const handleFillAtPoint = (boardX: number, boardY: number) => {
+    const currentShapes = shapesRef.current;
+    const currentStrokes = strokesRef.current;
+    const order = layerOrderRef.current;
+    const layerIdxMap = new Map<string, number>();
+    order.forEach((item, idx) => {
+      layerIdxMap.set(`${item.type}:${item.id}`, idx);
+    });
+
+    // 1. Find topmost hit geometric shape by Z-order
+    let bestShapeIdx = -1;
+    let bestShapeHit: ReturnType<typeof hitTestShapeFill> | null = null;
+    let bestShapeLayerIdx = -1;
+
+    for (let i = currentShapes.length - 1; i >= 0; i--) {
+      const shp = currentShapes[i];
+      const hit = hitTestShapeFill(shp, boardX, boardY);
+      if (hit.hit) {
+        const lIdx = layerIdxMap.get(`shape:${shp.id}`) ?? i;
+        if (lIdx > bestShapeLayerIdx) {
+          bestShapeLayerIdx = lIdx;
+          bestShapeIdx = i;
+          bestShapeHit = hit;
+        }
+      }
+    }
+
+    // 2. Check Freehand Closed Contours (strokes)
+    const clickPt = { x: boardX, y: boardY };
+    const detectedContour = findClosedContourForFill(currentStrokes, clickPt);
+    const detectedArea = detectedContour ? polygonArea(detectedContour.points) : Infinity;
+    const detectedLayerIdx = detectedContour
+      ? (layerIdxMap.get(`stroke:${detectedContour.ownerStrokeId}`) ?? -1)
+      : -1;
+
+    let bestExistingStrokeIdx = -1;
+    let bestExistingRegionIdx = -1;
+    let bestExistingLayerIdx = -1;
+
+    for (let i = currentStrokes.length - 1; i >= 0; i--) {
+      const s = currentStrokes[i];
+      const hitRegionIdx = findStrokeFillRegionAtPoint(s, boardX, boardY, true);
+      if (hitRegionIdx !== -1 && s.fillPolygons) {
+        const lIdx = layerIdxMap.get(`stroke:${s.id}`) ?? i;
+        if (lIdx > bestExistingLayerIdx) {
+          bestExistingLayerIdx = lIdx;
+          bestExistingStrokeIdx = i;
+          bestExistingRegionIdx = hitRegionIdx;
+        }
+      }
+    }
+
+    const topStrokeLayerIdx = Math.max(detectedLayerIdx, bestExistingLayerIdx);
+
+    // If a geometric shape is hit and sits above any hit stroke contour in Z-order, fill the shape
+    if (bestShapeIdx !== -1 && bestShapeHit && bestShapeLayerIdx >= topStrokeLayerIdx) {
+      const nextShapes = currentShapes.map((s, idx) => {
+        if (idx !== bestShapeIdx) return s;
+        if (s.type === 'cube' && bestShapeHit!.faceId) {
+          return {
+            ...s,
+            faceFills: {
+              ...(s.faceFills || {}),
+              [bestShapeHit!.faceId]: fillColor,
+            },
+            erasedFillStrokes: undefined,
+          };
+        }
+        return {
+          ...s,
+          fillColor,
+          erasedFillStrokes: undefined,
+        };
+      });
+      shapesRef.current = nextShapes;
+      setShapes(nextShapes);
+      pushHistory(strokesRef.current, textsRef.current, imagesRef.current, nextShapes);
+      return;
+    }
+
+    // Check if clickPt hits an already-filled stroke contour region
+    if (bestExistingStrokeIdx !== -1 && bestExistingRegionIdx !== -1) {
+      const s = currentStrokes[bestExistingStrokeIdx];
+      if (s.fillPolygons) {
+        const existingRegion = s.fillPolygons[bestExistingRegionIdx];
+        const existingArea = polygonArea(existingRegion.points);
+
+        if (!(detectedContour && detectedArea < existingArea * 0.82)) {
+          const nextStrokes = currentStrokes.map((st, idx) => {
+            if (idx !== bestExistingStrokeIdx || !st.fillPolygons) return st;
+            const nextRegions = st.fillPolygons.map((fp, rIdx) =>
+              rIdx === bestExistingRegionIdx ? { ...fp, color: fillColor } : fp
+            );
+            return {
+              ...st,
+              fillPolygons: nextRegions,
+              erasedFillStrokes: undefined,
+            };
+          });
+          strokesRef.current = nextStrokes;
+          setStrokes(nextStrokes);
+          pushHistory(nextStrokes, textsRef.current, imagesRef.current, shapesRef.current);
+          return;
+        }
+      }
+    }
+
+    // 3. Apply newly detected closed contour fill to its owner stroke
+    if (detectedContour) {
+      const newRegion: StrokeFillRegion = {
+        id: `fill-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        points: detectedContour.points,
+        color: fillColor,
+        isSmoothCurve: detectedContour.isSmoothCurve,
+        boundStrokeIds: detectedContour.boundStrokeIds,
+      };
+
+      const nextStrokes = currentStrokes.map((st) => {
+        if (st.id !== detectedContour.ownerStrokeId) return st;
+        return {
+          ...st,
+          fillPolygons: [...(st.fillPolygons || []), newRegion],
+        };
+      });
+
+      strokesRef.current = nextStrokes;
+      setStrokes(nextStrokes);
+      pushHistory(nextStrokes, textsRef.current, imagesRef.current, shapesRef.current);
+      return;
+    }
+
+    // Fallback: if shape was hit (even with lower layer index and no contour was filled)
+    if (bestShapeIdx !== -1 && bestShapeHit) {
+      const nextShapes = currentShapes.map((s, idx) => {
+        if (idx !== bestShapeIdx) return s;
+        if (s.type === 'cube' && bestShapeHit!.faceId) {
+          return {
+            ...s,
+            faceFills: {
+              ...(s.faceFills || {}),
+              [bestShapeHit!.faceId]: fillColor,
+            },
+            erasedFillStrokes: undefined,
+          };
+        }
+        return {
+          ...s,
+          fillColor,
+          erasedFillStrokes: undefined,
+        };
+      });
+      shapesRef.current = nextShapes;
+      setShapes(nextShapes);
+      pushHistory(strokesRef.current, textsRef.current, imagesRef.current, nextShapes);
+    }
+  };
+
   // Pointer Down on Board
   const handlePointerDown = (e: React.PointerEvent) => {
     // 1. Pan check (Spacebar held, Hand tool, or Middle mouse click)
@@ -1128,26 +1792,36 @@ export const BoardView: React.FC<BoardViewProps> = ({
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
 
-    const boardX = (e.clientX - rect.left - viewport.x) / viewport.zoom;
-    const boardY = (e.clientY - rect.top - viewport.y) / viewport.zoom;
+    const vp = viewportRef.current;
+    const boardX = (e.clientX - rect.left - vp.x) / vp.zoom;
+    const boardY = (e.clientY - rect.top - vp.y) / vp.zoom;
 
     // 2. Pen tool
     if (activeTool === 'pen') {
+      const firstPt = { x: boardX, y: boardY };
       const newStroke: BoardStroke = {
         id: `strk-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-        points: [{ x: boardX, y: boardY }],
+        points: [firstPt],
         color: penColor,
         width: strokeWidth,
       };
       activeStrokeRef.current = newStroke;
-      setCurrentStroke([newStroke]);
+      activePenLivePointRef.current = firstPt;
+      drawActivePenStroke(firstPt);
       (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+      return;
+    }
+
+    // 2b. Fill tool
+    if (activeTool === 'fill') {
+      handleFillAtPoint(boardX, boardY);
       return;
     }
 
     // 3. Eraser tool
     if (activeTool === 'eraser') {
       isErasingRef.current = true;
+      activeEraseGestureIdRef.current += 1;
       lastEraserPosRef.current = { x: boardX, y: boardY };
       if (eraserMode === 'object') {
         eraseWholeObjectAtPoint(boardX, boardY);
@@ -1171,8 +1845,17 @@ export const BoardView: React.FC<BoardViewProps> = ({
         height: 38,
       };
       const nextTexts = [...textsRef.current, newText];
+      const nextOrder = normalizeLayerOrder(
+        imagesRef.current,
+        strokesRef.current,
+        shapesRef.current,
+        nextTexts,
+        layerOrderRef.current
+      );
       textsRef.current = nextTexts;
+      layerOrderRef.current = nextOrder;
       setTexts(nextTexts);
+      setLayerOrder(nextOrder);
       setSelectedItems([{ type: 'text', id: newText.id }]);
       setEditingTextId(newText.id);
       setActiveTool('select');
@@ -1181,6 +1864,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
 
     // 4b. Shape tool: places selected shape at click coordinates (or two-click line for 'line-custom')
     if (activeTool === 'shape') {
+      if (!activeShapeType) return;
       const screenX = e.clientX - rect.left;
       const screenY = e.clientY - rect.top;
 
@@ -1226,6 +1910,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
           setLineDraftStart(null);
           shapeCursorPosRef.current = null;
           hideShapeCursorPreview();
+          setActiveShapeType(null);
           setActiveTool('select');
           pushHistory(strokesRef.current, textsRef.current, imagesRef.current, nextShapes);
           return;
@@ -1250,6 +1935,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
       shapesRef.current = nextShapes;
       setShapes(nextShapes);
       setSelectedItems([{ type: 'shape', id: newShape.id }]);
+      setActiveShapeType(null);
       setActiveTool('select');
       shapeCursorPosRef.current = null;
       hideShapeCursorPreview();
@@ -1298,20 +1984,31 @@ export const BoardView: React.FC<BoardViewProps> = ({
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
 
-    const boardX = (e.clientX - rect.left - viewport.x) / viewport.zoom;
-    const boardY = (e.clientY - rect.top - viewport.y) / viewport.zoom;
+    const vp = viewportRef.current;
+    const boardX = (e.clientX - rect.left - vp.x) / vp.zoom;
+    const boardY = (e.clientY - rect.top - vp.y) / vp.zoom;
 
-    // 2. Pen drawing
+    // 2. Pen drawing (synchronous canvas update with coalesced pointer events and live tip)
     if (activeTool === 'pen' && activeStrokeRef.current) {
       const stroke = activeStrokeRef.current;
       const pts = stroke.points;
-      const lastPt = pts[pts.length - 1];
+      const nativeEv = e.nativeEvent as PointerEvent;
+      const coalesced = nativeEv.getCoalescedEvents?.() ?? [nativeEv];
 
-      const dist = Math.hypot(boardX - lastPt.x, boardY - lastPt.y);
-      if (dist >= 1.5) {
-        pts.push({ x: boardX, y: boardY });
-        setCurrentStroke([{ ...stroke, points: [...pts] }]);
+      for (let i = 0; i < coalesced.length; i++) {
+        const cev = coalesced[i];
+        const cx = (cev.clientX - rect.left - vp.x) / vp.zoom;
+        const cy = (cev.clientY - rect.top - vp.y) / vp.zoom;
+        const lastPt = pts[pts.length - 1];
+        const screenDist = Math.hypot(cx - lastPt.x, cy - lastPt.y) * vp.zoom;
+        if (screenDist >= 1.5) {
+          pts.push({ x: cx, y: cy });
+        }
       }
+
+      const liveTip = { x: boardX, y: boardY };
+      activePenLivePointRef.current = liveTip;
+      drawActivePenStroke(liveTip);
       return;
     }
 
@@ -1331,7 +2028,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
     }
 
     // 3b. Shape placement cursor (synchronous DOM update to avoid React re-render lag)
-    if (activeTool === 'shape') {
+    if (activeTool === 'shape' && activeShapeType) {
       const screenX = e.clientX - rect.left;
       const screenY = e.clientY - rect.top;
       shapeCursorPosRef.current = { x: boardX, y: boardY, screenX, screenY };
@@ -1343,8 +2040,8 @@ export const BoardView: React.FC<BoardViewProps> = ({
 
       if (activeShapeType === 'line-custom') {
         if (lineDraftStart) {
-          const startScreenX = lineDraftStart.x * viewport.zoom + viewport.x;
-          const startScreenY = lineDraftStart.y * viewport.zoom + viewport.y;
+          const startScreenX = lineDraftStart.x * vp.zoom + vp.x;
+          const startScreenY = lineDraftStart.y * vp.zoom + vp.y;
           customLinePreviewLineRef.current?.setAttribute('x1', String(startScreenX));
           customLinePreviewLineRef.current?.setAttribute('y1', String(startScreenY));
           customLinePreviewLineRef.current?.setAttribute('x2', String(screenX));
@@ -1358,8 +2055,8 @@ export const BoardView: React.FC<BoardViewProps> = ({
           customLineCursorDotRef.current.style.top = `${screenY}px`;
         }
       } else if (shapeGhostPreviewRef.current) {
-        const defW = (SHAPE_MAP.get(activeShapeType)?.defaultWidth || 120) * viewport.zoom;
-        const defH = (SHAPE_MAP.get(activeShapeType)?.defaultHeight || 120) * viewport.zoom;
+        const defW = (SHAPE_MAP.get(activeShapeType)?.defaultWidth || 120) * vp.zoom;
+        const defH = (SHAPE_MAP.get(activeShapeType)?.defaultHeight || 120) * vp.zoom;
         shapeGhostPreviewRef.current.style.left = `${screenX - defW / 2}px`;
         shapeGhostPreviewRef.current.style.top = `${screenY - defH / 2}px`;
       }
@@ -1388,14 +2085,23 @@ export const BoardView: React.FC<BoardViewProps> = ({
 
     if (activeTool === 'pen' && activeStrokeRef.current) {
       const finished = activeStrokeRef.current;
+      const finalTip = activePenLivePointRef.current;
+      if (finalTip && finished.points.length > 0) {
+        const lastPt = finished.points[finished.points.length - 1];
+        if (Math.hypot(finalTip.x - lastPt.x, finalTip.y - lastPt.y) > 0.2) {
+          finished.points.push({ x: finalTip.x, y: finalTip.y });
+        }
+      }
       activeStrokeRef.current = null;
-      setCurrentStroke([]);
+      activePenLivePointRef.current = null;
 
       if (finished.points.length > 0) {
         const nextStrokes = [...strokesRef.current, finished];
         strokesRef.current = nextStrokes;
         setStrokes(nextStrokes);
         pushHistory(nextStrokes, textsRef.current, imagesRef.current);
+      } else {
+        drawActivePenStroke(null);
       }
     }
 
@@ -1431,6 +2137,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
         });
 
         // 3. Check Strokes
+        const matchedStrokeIds = new Set<string>();
         strokes.forEach((strk) => {
           let hit = false;
           for (let i = 0; i < strk.points.length; i++) {
@@ -1446,7 +2153,34 @@ export const BoardView: React.FC<BoardViewProps> = ({
               }
             }
           }
+          if (!hit && strk.fillPolygons) {
+            for (const region of strk.fillPolygons) {
+              for (let i = 0; i < region.points.length; i++) {
+                const p = region.points[i];
+                if (p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2) {
+                  hit = true;
+                  break;
+                }
+                const nextP = region.points[(i + 1) % region.points.length];
+                if (segmentIntersectsBox(p, nextP, x1, y1, x2, y2)) {
+                  hit = true;
+                  break;
+                }
+              }
+              if (hit) break;
+            }
+          }
           if (hit) {
+            matchedStrokeIds.add(strk.id);
+            if (strk.fillPolygons) {
+              for (const region of strk.fillPolygons) {
+                region.boundStrokeIds?.forEach((id) => matchedStrokeIds.add(id));
+              }
+            }
+          }
+        });
+        strokes.forEach((strk) => {
+          if (matchedStrokeIds.has(strk.id)) {
             matched.push({ type: 'stroke', id: strk.id });
           }
         });
@@ -1480,71 +2214,118 @@ export const BoardView: React.FC<BoardViewProps> = ({
     }
   };
 
-  // Eraser Mode 1: Erase whole object/stroke on click/touch
+  // Eraser Mode 1: Erase whole object/stroke on click/touch (respecting Z-order from top to bottom)
   const eraseWholeObjectAtPoint = (x: number, y: number) => {
-    // 1. Check texts
-    const currentTexts = textsRef.current;
-    for (let i = currentTexts.length - 1; i >= 0; i--) {
-      const txt = currentTexts[i];
-      const lines = txt.text.split('\n');
-      const maxLineLen = lines.reduce((max, l) => Math.max(max, l.length), 0);
-      const estW = Math.max(60, maxLineLen * (txt.fontSize * 0.65) + 24);
-      const estH = Math.max(28, lines.length * (txt.fontSize * 1.3) + 16);
-      const pad = 10;
-      if (x >= txt.x - pad && x <= txt.x + estW + pad && y >= txt.y - pad && y <= txt.y + estH + pad) {
-        const nextTexts = currentTexts.filter((t) => t.id !== txt.id);
-        textsRef.current = nextTexts;
-        setTexts(nextTexts);
-        setSelectedItems((prev) => prev.filter((item) => item.id !== txt.id));
+    const order = normalizeLayerOrder(
+      imagesRef.current,
+      strokesRef.current,
+      shapesRef.current,
+      textsRef.current,
+      layerOrderRef.current
+    );
+    const txtMap = new Map(textsRef.current.map((t) => [t.id, t]));
+    const shpMap = new Map(shapesRef.current.map((s) => [s.id, s]));
+    const imgMap = new Map(imagesRef.current.map((im) => [im.id, im]));
+    const strkMap = new Map(strokesRef.current.map((st) => [st.id, st]));
+
+    for (let i = order.length - 1; i >= 0; i--) {
+      const item = order[i];
+
+      if (item.type === 'text') {
+        const txt = txtMap.get(item.id);
+        if (!txt) continue;
+        const lines = txt.text.split('\n');
+        const maxLineLen = lines.reduce((max, l) => Math.max(max, l.length), 0);
+        const estW = Math.max(60, maxLineLen * (txt.fontSize * 0.65) + 24);
+        const estH = Math.max(28, lines.length * (txt.fontSize * 1.3) + 16);
+        const pad = 10;
+        if (x >= txt.x - pad && x <= txt.x + estW + pad && y >= txt.y - pad && y <= txt.y + estH + pad) {
+          const nextTexts = textsRef.current.filter((t) => t.id !== txt.id);
+          textsRef.current = nextTexts;
+          setTexts(nextTexts);
+          setSelectedItems((prev) => prev.filter((sel) => sel.id !== txt.id));
+          if (loadedTaskIdRef.current === taskIdRef.current) {
+            revisionRef.current += 1;
+            isDirtyRef.current = true;
+          }
+          return;
+        }
+      } else if (item.type === 'shape') {
+        const shp = shpMap.get(item.id);
+        if (!shp) continue;
+        const pad = 10;
+        const cx = shp.x + shp.width / 2;
+        const cy = shp.y + shp.height / 2;
+        const rad = -((shp.rotation || 0) * Math.PI) / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        const localX = cx + (x - cx) * cos - (y - cy) * sin;
+        const localY = cy + (x - cx) * sin + (y - cy) * cos;
+        if (
+          localX >= shp.x - pad &&
+          localX <= shp.x + shp.width + pad &&
+          localY >= shp.y - pad &&
+          localY <= shp.y + shp.height + pad
+        ) {
+          const nextShapes = shapesRef.current.filter((s) => s.id !== shp.id);
+          shapesRef.current = nextShapes;
+          setShapes(nextShapes);
+          setSelectedItems((prev) => prev.filter((sel) => sel.id !== shp.id));
+          if (loadedTaskIdRef.current === taskIdRef.current) {
+            revisionRef.current += 1;
+            isDirtyRef.current = true;
+          }
+          return;
+        }
+      } else if (item.type === 'image') {
+        const img = imgMap.get(item.id);
+        if (!img) continue;
+        const pad = 10;
+        if (x >= img.x - pad && x <= img.x + img.width + pad && y >= img.y - pad && y <= img.y + img.height + pad) {
+          const nextImages = imagesRef.current.filter((im) => im.id !== img.id);
+          imagesRef.current = nextImages;
+          setImages(nextImages);
+          setSelectedItems((prev) => prev.filter((sel) => sel.id !== img.id));
+          if (loadedTaskIdRef.current === taskIdRef.current) {
+            revisionRef.current += 1;
+            isDirtyRef.current = true;
+          }
+          return;
+        }
+      } else if (item.type === 'stroke') {
+        const hitStroke = strkMap.get(item.id);
+        if (!hitStroke || !isStrokeHitAtPoint(hitStroke, x, y, 12)) continue;
+
+        const idsToDelete = new Set<string>([hitStroke.id]);
+        if (hitStroke.fillPolygons) {
+          hitStroke.fillPolygons.forEach((fp) => {
+            fp.boundStrokeIds?.forEach((bid) => idsToDelete.add(bid));
+          });
+        }
+        const filtered = strokesRef.current
+          .filter((s) => !idsToDelete.has(s.id))
+          .map((s) => {
+            if (!s.fillPolygons) return s;
+            const remainingPolys = s.fillPolygons.filter(
+              (fp) => !fp.boundStrokeIds || !fp.boundStrokeIds.some((bid) => idsToDelete.has(bid))
+            );
+            if (remainingPolys.length === s.fillPolygons.length) return s;
+            return {
+              ...s,
+              fillPolygons: remainingPolys.length > 0 ? remainingPolys : undefined,
+            };
+          })
+          .filter((s) => s.points.length > 0 || (s.fillPolygons && s.fillPolygons.length > 0));
+
+        strokesRef.current = filtered;
+        setStrokes(filtered);
+        setSelectedItems((prev) => prev.filter((sel) => !idsToDelete.has(sel.id)));
+        if (loadedTaskIdRef.current === taskIdRef.current) {
+          revisionRef.current += 1;
+          isDirtyRef.current = true;
+        }
         return;
       }
-    }
-    // 2. Check shapes (transform click point into shape's local unrotated coordinates)
-    const currentShapes = shapesRef.current;
-    for (let i = currentShapes.length - 1; i >= 0; i--) {
-      const shp = currentShapes[i];
-      const pad = 10;
-      const cx = shp.x + shp.width / 2;
-      const cy = shp.y + shp.height / 2;
-      const rad = -((shp.rotation || 0) * Math.PI) / 180;
-      const cos = Math.cos(rad);
-      const sin = Math.sin(rad);
-      const localX = cx + (x - cx) * cos - (y - cy) * sin;
-      const localY = cy + (x - cx) * sin + (y - cy) * cos;
-      if (
-        localX >= shp.x - pad &&
-        localX <= shp.x + shp.width + pad &&
-        localY >= shp.y - pad &&
-        localY <= shp.y + shp.height + pad
-      ) {
-        const nextShapes = currentShapes.filter((s) => s.id !== shp.id);
-        shapesRef.current = nextShapes;
-        setShapes(nextShapes);
-        setSelectedItems((prev) => prev.filter((item) => item.id !== shp.id));
-        pushHistory(strokesRef.current, textsRef.current, imagesRef.current, nextShapes);
-        return;
-      }
-    }
-    // 3. Check images
-    const currentImages = imagesRef.current;
-    for (let i = currentImages.length - 1; i >= 0; i--) {
-      const img = currentImages[i];
-      const pad = 10;
-      if (x >= img.x - pad && x <= img.x + img.width + pad && y >= img.y - pad && y <= img.y + img.height + pad) {
-        const nextImages = currentImages.filter((im) => im.id !== img.id);
-        imagesRef.current = nextImages;
-        setImages(nextImages);
-        setSelectedItems((prev) => prev.filter((item) => item.id !== img.id));
-        return;
-      }
-    }
-    // 4. Check strokes
-    const hitStroke = findStrokeAtPoint(x, y, 12);
-    if (hitStroke) {
-      const filtered = strokesRef.current.filter((s) => s.id !== hitStroke.id);
-      strokesRef.current = filtered;
-      setStrokes(filtered);
-      setSelectedItems((prev) => prev.filter((item) => item.id !== hitStroke.id));
     }
   };
 
@@ -1581,12 +2362,81 @@ export const BoardView: React.FC<BoardViewProps> = ({
     };
   }
 
-  // Eraser Mode 2: Geometric Line Cutting Along Eraser Path [e1, e2]
+  // Eraser Mode 2: Geometric Line Cutting & Partial Fill Erasing Along Eraser Path [e1, e2]
   const eraseAreaAlongSegment = (x0: number, y0: number, x1: number, y1: number) => {
     const e1 = { x: x0, y: y0 };
     const e2 = { x: x1, y: y1 };
     const radius = eraserRadius;
+    const gestureId = activeEraseGestureIdRef.current;
 
+    // Part A: Partially erase fill inside filled geometric shapes (without deleting the shape outline)
+    const currentShapes = shapesRef.current;
+    let shapesChanged = false;
+    const nextShapes = currentShapes.map((shp) => {
+      const hasFill = Boolean(
+        shp.fillColor || (shp.faceFills && Object.keys(shp.faceFills).length > 0)
+      );
+      if (!hasFill) return shp;
+
+      const w = Math.max(10, shp.width);
+      const h = Math.max(10, shp.height);
+      const l1 = worldToShapeLocal(shp, x0, y0);
+      const l2 = worldToShapeLocal(shp, x1, y1);
+
+      if (!segmentIntersectsBoxWithRadius(l1, l2, 0, 0, w, h, radius)) {
+        return shp;
+      }
+
+      shapesChanged = true;
+      const n1 = {
+        x: Math.round((l1.x / w) * 1000) / 1000,
+        y: Math.round((l1.y / h) * 1000) / 1000,
+      };
+      const n2 = {
+        x: Math.round((l2.x / w) * 1000) / 1000,
+        y: Math.round((l2.y / h) * 1000) / 1000,
+      };
+
+      const existingErased = shp.erasedFillStrokes ? [...shp.erasedFillStrokes] : [];
+      const lastGestureForShape = shapeEraseGestureMapRef.current.get(shp.id);
+
+      if (lastGestureForShape === gestureId && existingErased.length > 0) {
+        const lastStroke = existingErased[existingErased.length - 1];
+        const pts = lastStroke.points;
+        const lastPt = pts[pts.length - 1];
+        if (Math.hypot(n2.x - lastPt.x, n2.y - lastPt.y) > 0.002) {
+          existingErased[existingErased.length - 1] = {
+            ...lastStroke,
+            points: [...pts, n2],
+          };
+        }
+      } else {
+        shapeEraseGestureMapRef.current.set(shp.id, gestureId);
+        const initialPts =
+          Math.hypot(n2.x - n1.x, n2.y - n1.y) > 0.002 ? [n1, n2] : [n1];
+        existingErased.push({
+          points: initialPts,
+          radiusRatioX: radius / w,
+          radiusRatioY: radius / h,
+        });
+      }
+
+      return {
+        ...shp,
+        erasedFillStrokes: existingErased,
+      };
+    });
+
+    if (shapesChanged) {
+      shapesRef.current = nextShapes;
+      setShapes(nextShapes);
+      if (loadedTaskIdRef.current === taskIdRef.current) {
+        revisionRef.current += 1;
+        isDirtyRef.current = true;
+      }
+    }
+
+    // Part B: Cut stroke outlines & partially erase filled freehand contours
     const currentStrokes = strokesRef.current;
     let anyChanged = false;
     const nextStrokes: BoardStroke[] = [];
@@ -1598,9 +2448,71 @@ export const BoardView: React.FC<BoardViewProps> = ({
     const eMaxY = Math.max(y0, y1) + radius;
 
     for (let sIdx = 0; sIdx < currentStrokes.length; sIdx++) {
-      const stroke = currentStrokes[sIdx];
+      let stroke = currentStrokes[sIdx];
+      const hasFillRegions = Boolean(stroke.fillPolygons && stroke.fillPolygons.length > 0);
+
+      // Check if the eraser segment intersects this stroke's fillPolygons bounding box
+      if (hasFillRegions && stroke.fillPolygons) {
+        let fMinX = Infinity,
+          fMinY = Infinity,
+          fMaxX = -Infinity,
+          fMaxY = -Infinity;
+        for (let i = 0; i < stroke.fillPolygons.length; i++) {
+          const rPts = stroke.fillPolygons[i].points;
+          for (let j = 0; j < rPts.length; j++) {
+            const p = rPts[j];
+            if (p.x < fMinX) fMinX = p.x;
+            if (p.x > fMaxX) fMaxX = p.x;
+            if (p.y < fMinY) fMinY = p.y;
+            if (p.y > fMaxY) fMaxY = p.y;
+          }
+        }
+
+        if (!(eMaxX < fMinX || eMinX > fMaxX || eMaxY < fMinY || eMinY > fMaxY)) {
+          anyChanged = true;
+          const existingErased: StrokeErasedPath[] = stroke.erasedFillStrokes
+            ? [...stroke.erasedFillStrokes]
+            : [];
+          const lastGestureForStroke = strokeEraseGestureMapRef.current.get(stroke.id);
+          const pStart = { x: Math.round(x0 * 10) / 10, y: Math.round(y0 * 10) / 10 };
+          const pEnd = { x: Math.round(x1 * 10) / 10, y: Math.round(y1 * 10) / 10 };
+
+          if (lastGestureForStroke === gestureId && existingErased.length > 0) {
+            const lastPath = existingErased[existingErased.length - 1];
+            const lPts = lastPath.points;
+            const lastPt = lPts[lPts.length - 1];
+            if (Math.hypot(pEnd.x - lastPt.x, pEnd.y - lastPt.y) > 0.5) {
+              existingErased[existingErased.length - 1] = {
+                ...lastPath,
+                points: [...lPts, pEnd],
+              };
+            }
+          } else {
+            strokeEraseGestureMapRef.current.set(stroke.id, gestureId);
+            const initialPts =
+              Math.hypot(pEnd.x - pStart.x, pEnd.y - pStart.y) > 0.5
+                ? [pStart, pEnd]
+                : [pStart];
+            existingErased.push({
+              points: initialPts,
+              radius,
+            });
+          }
+
+          stroke = {
+            ...stroke,
+            erasedFillStrokes: existingErased,
+          };
+        }
+      }
+
       const pts = stroke.points;
-      if (!pts || pts.length === 0) continue;
+      if (!pts || pts.length === 0) {
+        if (hasFillRegions) {
+          nextStrokes.push(stroke);
+        }
+        continue;
+      }
 
       const strokeRadius = stroke.width / 2;
       const R_eff = radius + strokeRadius;
@@ -1610,13 +2522,16 @@ export const BoardView: React.FC<BoardViewProps> = ({
         const d = distToSegment(pts[0], e1, e2);
         if (d < R_eff) {
           anyChanged = true;
+          if (hasFillRegions) {
+            nextStrokes.push({ ...stroke, points: [] });
+          }
           continue; // erased
         }
         nextStrokes.push(stroke);
         continue;
       }
 
-      // 2. Pre-check bounding box of stroke including full stroke width
+      // 2. Pre-check bounding box of stroke outline including full stroke width
       let sMinX = Infinity,
         sMinY = Infinity,
         sMaxX = -Infinity,
@@ -1633,14 +2548,13 @@ export const BoardView: React.FC<BoardViewProps> = ({
       sMinY -= strokeRadius;
       sMaxY += strokeRadius;
 
-      // If bounding boxes do not overlap, stroke cannot be touched
+      // If outline bounding boxes do not overlap, outline points cannot be cut
       if (eMaxX < sMinX || eMinX > sMaxX || eMaxY < sMinY || eMinY > sMaxY) {
         nextStrokes.push(stroke);
         continue;
       }
 
       // 3. Subdivide any long segments to guarantee maximum segment length <= maxStep
-      // This ensures that no segment can skip across the eraser circle without having an endpoint inside
       const maxStep = Math.min(4, Math.max(1, R_eff / 2));
       const densePts: BoardPoint[] = [];
       densePts.push(pts[0]);
@@ -1665,6 +2579,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
       // 4. Trace the dense points and cut precisely along the boundary distToSegment(P, e1, e2) = R_eff
       const newSegments: BoardPoint[][] = [];
       let currentSeg: BoardPoint[] = [];
+      let outlineCut = false;
 
       for (let i = 0; i < densePts.length - 1; i++) {
         const p1 = densePts[i];
@@ -1680,6 +2595,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
         } else if (!in1 && in2) {
           // Entering eraser: find exact cut point
           anyChanged = true;
+          outlineCut = true;
           if (currentSeg.length === 0) currentSeg.push(p1);
           const cut = findCutPoint(p1, p2, e1, e2, R_eff);
           currentSeg.push(cut);
@@ -1688,11 +2604,13 @@ export const BoardView: React.FC<BoardViewProps> = ({
         } else if (in1 && !in2) {
           // Exiting eraser: find exact cut point
           anyChanged = true;
+          outlineCut = true;
           const cut = findCutPoint(p1, p2, e1, e2, R_eff);
           currentSeg = [cut, p2];
         } else {
           // Both inside: erased
           anyChanged = true;
+          outlineCut = true;
         }
       }
 
@@ -1700,8 +2618,14 @@ export const BoardView: React.FC<BoardViewProps> = ({
         newSegments.push(currentSeg);
       }
 
-      // 5. Add surviving sub-strokes (filter out zero-length specks)
+      if (!outlineCut) {
+        nextStrokes.push(stroke);
+        continue;
+      }
+
+      // 5. Add surviving sub-strokes (keep fillPolygons on the primary part so fill is never duplicated or lost)
       let partCount = 0;
+      const createdSubStrokeIds: string[] = [];
       for (let k = 0; k < newSegments.length; k++) {
         const seg = newSegments[k];
         if (seg.length >= 2) {
@@ -1711,21 +2635,57 @@ export const BoardView: React.FC<BoardViewProps> = ({
           }
           if (segLen >= 1) {
             partCount++;
+            const newId = partCount === 1 ? stroke.id : `${stroke.id}-p${partCount}-${Date.now()}`;
+            createdSubStrokeIds.push(newId);
             nextStrokes.push({
               ...stroke,
-              id: `${stroke.id}-p${partCount}-${Date.now()}`,
+              id: newId,
               points: seg,
+              fillPolygons: partCount === 1 ? stroke.fillPolygons : undefined,
+              erasedFillStrokes: partCount === 1 ? stroke.erasedFillStrokes : undefined,
             });
           }
-        } else if (seg.length === 1 && !anyChanged) {
-          nextStrokes.push(stroke);
         }
+      }
+
+      // Preserve Z-order position for split sub-strokes in layerOrderRef
+      if (createdSubStrokeIds.length > 1) {
+        const updatedOrder: SelectedItem[] = [];
+        layerOrderRef.current.forEach((item) => {
+          if (item.type === 'stroke' && item.id === stroke.id) {
+            createdSubStrokeIds.forEach((cid) => updatedOrder.push({ type: 'stroke', id: cid }));
+          } else {
+            updatedOrder.push(item);
+          }
+        });
+        layerOrderRef.current = updatedOrder;
+      }
+
+      // If all outline segments were erased but the stroke still has a fill, preserve the fill holder
+      if (partCount === 0 && hasFillRegions) {
+        nextStrokes.push({
+          ...stroke,
+          points: [],
+        });
       }
     }
 
     if (anyChanged) {
+      const syncedOrder = normalizeLayerOrder(
+        imagesRef.current,
+        nextStrokes,
+        shapesRef.current,
+        textsRef.current,
+        layerOrderRef.current
+      );
+      layerOrderRef.current = syncedOrder;
       strokesRef.current = nextStrokes;
       setStrokes(nextStrokes);
+      setLayerOrder(syncedOrder);
+      if (loadedTaskIdRef.current === taskIdRef.current) {
+        revisionRef.current += 1;
+        isDirtyRef.current = true;
+      }
       const nextStrokeIds = new Set(nextStrokes.map((s) => s.id));
       setSelectedItems((prev) => prev.filter((item) => item.type !== 'stroke' || nextStrokeIds.has(item.id)));
     }
@@ -1800,7 +2760,20 @@ export const BoardView: React.FC<BoardViewProps> = ({
 
     const nextImages = imagesRef.current.filter((img) => !selectedIds.has(img.id));
     const nextTexts = textsRef.current.filter((txt) => !selectedIds.has(txt.id));
-    const nextStrokes = strokesRef.current.filter((strk) => !selectedIds.has(strk.id));
+    const nextStrokes = strokesRef.current
+      .filter((strk) => !selectedIds.has(strk.id))
+      .map((s) => {
+        if (!s.fillPolygons) return s;
+        const remainingPolys = s.fillPolygons.filter(
+          (fp) => !fp.boundStrokeIds || !fp.boundStrokeIds.some((bid) => selectedIds.has(bid))
+        );
+        if (remainingPolys.length === s.fillPolygons.length) return s;
+        return {
+          ...s,
+          fillPolygons: remainingPolys.length > 0 ? remainingPolys : undefined,
+        };
+      })
+      .filter((s) => s.points.length > 0 || (s.fillPolygons && s.fillPolygons.length > 0));
     const nextShapes = shapesRef.current.filter((shp) => !selectedIds.has(shp.id));
 
     imagesRef.current = nextImages;
@@ -1845,8 +2818,24 @@ export const BoardView: React.FC<BoardViewProps> = ({
   };
 
   // Update stroke points directly (absolute, zero-drift, zero-jitter)
-  const handleUpdateStrokePoints = (id: string, newPoints: BoardPoint[], isFinal = false) => {
-    const nextStrokes = strokesRef.current.map((s) => (s.id === id ? { ...s, points: newPoints } : s));
+  const handleUpdateStrokePoints = (
+    id: string,
+    newPoints: BoardPoint[],
+    isFinal = false,
+    newFillPolygons?: StrokeFillRegion[],
+    newErasedFillStrokes?: StrokeErasedPath[]
+  ) => {
+    const nextStrokes = strokesRef.current.map((s) =>
+      s.id === id
+        ? {
+            ...s,
+            points: newPoints,
+            fillPolygons: newFillPolygons !== undefined ? newFillPolygons : s.fillPolygons,
+            erasedFillStrokes:
+              newErasedFillStrokes !== undefined ? newErasedFillStrokes : s.erasedFillStrokes,
+          }
+        : s
+    );
     setStrokes(nextStrokes);
     strokesRef.current = nextStrokes;
     if (loadedTaskIdRef.current === taskIdRef.current) {
@@ -1862,7 +2851,12 @@ export const BoardView: React.FC<BoardViewProps> = ({
   const handleUpdateMultipleAbsolute = (
     updatedImages: { id: string; x: number; y: number }[],
     updatedTexts: { id: string; x: number; y: number; width?: number; height?: number; fontSize?: number }[],
-    updatedStrokes: { id: string; points: BoardPoint[] }[],
+    updatedStrokes: {
+      id: string;
+      points: BoardPoint[];
+      fillPolygons?: StrokeFillRegion[];
+      erasedFillStrokes?: StrokeErasedPath[];
+    }[],
     updatedShapes: { id: string; x: number; y: number; width?: number; height?: number }[] = [],
     isFinal = false
   ) => {
@@ -1893,7 +2887,15 @@ export const BoardView: React.FC<BoardViewProps> = ({
       const strkMap = new Map(updatedStrokes.map((s) => [s.id, s]));
       nextStrokes = strokesRef.current.map((s) => {
         const u = strkMap.get(s.id);
-        return u ? { ...s, points: u.points } : s;
+        return u
+          ? {
+              ...s,
+              points: u.points,
+              fillPolygons: u.fillPolygons !== undefined ? u.fillPolygons : s.fillPolygons,
+              erasedFillStrokes:
+                u.erasedFillStrokes !== undefined ? u.erasedFillStrokes : s.erasedFillStrokes,
+            }
+          : s;
       });
       setStrokes(nextStrokes);
       strokesRef.current = nextStrokes;
@@ -1949,6 +2951,36 @@ export const BoardView: React.FC<BoardViewProps> = ({
   const gridOffsetX = viewport.x % gridSize;
   const gridOffsetY = viewport.y % gridSize;
 
+  // Compute unified Z-order across all board objects
+  const effectiveLayerOrder = normalizeLayerOrder(images, strokes, shapes, texts, layerOrder);
+  const zIndexMap = new Map<string, number>();
+  effectiveLayerOrder.forEach((item, idx) => {
+    zIndexMap.set(`${item.type}:${item.id}`, idx + 1);
+  });
+
+  // Group contiguous strokes in Z-order into BoardCanvas batches so strokes can interleave with images, shapes, and texts
+  const strokeLookup = new Map(strokes.map((s) => [s.id, s]));
+  const strokeBatches: { key: string; strokes: BoardStroke[]; zIndex: number }[] = [];
+  effectiveLayerOrder.forEach((item, idx) => {
+    if (item.type === 'stroke') {
+      const s = strokeLookup.get(item.id);
+      if (!s) return;
+      const lastBatch = strokeBatches[strokeBatches.length - 1];
+      if (lastBatch && lastBatch.zIndex === idx) {
+        lastBatch.strokes.push(s);
+        lastBatch.zIndex = idx + 1;
+      } else {
+        strokeBatches.push({
+          key: `stroke-batch-${s.id}`,
+          strokes: [s],
+          zIndex: idx + 1,
+        });
+      }
+    }
+  });
+
+  const topOverlayBaseZ = effectiveLayerOrder.length + 10;
+
   return (
     <div
       ref={rootRef}
@@ -1979,6 +3011,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
               setSelectedItems([]);
               setEditingTextId(null);
             }
+            if (tool !== 'shape') {
+              setActiveShapeType(null);
+            }
             setEraserCursorPos(null);
           }}
           canUndo={historyIndex > 0}
@@ -1990,6 +3025,8 @@ export const BoardView: React.FC<BoardViewProps> = ({
           onChangeColor={handleChangeColor}
           strokeWidth={strokeWidth}
           onChangeStrokeWidth={handleChangeStrokeWidth}
+          fillColor={fillColor}
+          onChangeFillColor={setFillColor}
           textColor={textColor}
           onChangeTextColor={handleChangeTextColor}
           textFontSize={textFontSize}
@@ -2004,6 +3041,8 @@ export const BoardView: React.FC<BoardViewProps> = ({
           onChangeEraserRadius={setEraserRadius}
           selectedCount={selectedItems.length}
           onDeleteSelected={handleDeleteSelected}
+          showBringForward={isSingleObjectSelected}
+          onBringForward={handleBringForward}
           zoomPercent={Math.round(viewport.zoom * 100)}
           onZoomIn={() => handleZoom(1.2)}
           onZoomOut={() => handleZoom(0.83)}
@@ -2127,21 +3166,22 @@ export const BoardView: React.FC<BoardViewProps> = ({
             e.currentTarget.scrollLeft = 0;
           }
         }}
-        className={`board-viewport absolute inset-0 w-full h-full overflow-hidden select-none touch-none ${
+        className={`board-viewport absolute inset-0 z-10 w-full h-full overflow-hidden select-none touch-none ${
           isSpacePressed || activeTool === 'pan'
             ? 'cursor-grab active:cursor-grabbing'
-            : activeTool === 'pen'
+            : activeTool === 'pen' || activeTool === 'fill'
             ? 'cursor-crosshair'
             : activeTool === 'eraser'
             ? (eraserMode === 'area' ? 'cursor-none' : 'cursor-crosshair')
             : activeTool === 'text'
             ? 'cursor-text'
-            : activeTool === 'shape'
+            : activeTool === 'shape' && activeShapeType
             ? 'cursor-crosshair'
             : 'cursor-default'
         }`}
         style={{
           overflow: 'clip',
+          isolation: 'isolate',
           backgroundColor: '#ffffff',
           backgroundImage: `
             linear-gradient(to right, rgba(0, 0, 0, 0.05) 1px, transparent 1px),
@@ -2160,16 +3200,17 @@ export const BoardView: React.FC<BoardViewProps> = ({
           className="hidden"
         />
 
-      {/* Layer 1: Images */}
+      {/* Images (ordered dynamically via zIndexMap) */}
       {images.map((img) => (
         <BoardImageElement
           key={img.id}
           image={img}
           isSelected={selectedItems.some((i) => i.id === img.id)}
-          isEraserActive={activeTool === 'eraser' || activeTool === 'shape'}
+          isEraserActive={activeTool === 'eraser' || activeTool === 'shape' || activeTool === 'fill'}
           zoom={viewport.zoom}
           viewportX={viewport.x}
           viewportY={viewport.y}
+          zIndex={zIndexMap.get(`image:${img.id}`) ?? 1}
           onSelect={(e) => {
             if (activeTool === 'select') {
               startDirectObjectDrag({ type: 'image', id: img.id }, e);
@@ -2178,24 +3219,40 @@ export const BoardView: React.FC<BoardViewProps> = ({
         />
       ))}
 
-      {/* Layer 2: Vector Drawing Canvas (Freehand Pen, Eraser) */}
-      <BoardCanvas
-        strokes={strokes}
-        currentStroke={currentStroke[0] || null}
-        viewportX={viewport.x}
-        viewportY={viewport.y}
-        zoom={viewport.zoom}
-        width={containerSize.width}
-        height={containerSize.height}
-        eraserPreview={null}
-        marqueeRect={null}
+      {/* Vector Drawing Canvas Batches (interleaved dynamically via Z-order) */}
+      {strokeBatches.map((batch) => (
+        <BoardCanvas
+          key={batch.key}
+          strokes={batch.strokes}
+          currentStroke={null}
+          viewportX={viewport.x}
+          viewportY={viewport.y}
+          zoom={viewport.zoom}
+          width={containerSize.width}
+          height={containerSize.height}
+          zIndex={batch.zIndex}
+          eraserPreview={null}
+          marqueeRect={null}
+        />
+      ))}
+
+      {/* Active Pen Stroke Preview Canvas (always mounted, updated synchronously on pointerdown/pointermove) */}
+      <canvas
+        ref={activePenCanvasRef}
+        style={{
+          width: containerSize.width,
+          height: containerSize.height,
+          zIndex: topOverlayBaseZ,
+        }}
+        className="absolute inset-0 pointer-events-none"
       />
 
       {/* Area Eraser Floating Cursor Ring */}
       {activeTool === 'eraser' && eraserMode === 'area' && eraserCursorPos && (
         <div
-          className="absolute pointer-events-none z-50 rounded-full border border-black/80 bg-black/10 transition-none"
+          className="absolute pointer-events-none rounded-full border border-black/80 bg-black/10 transition-none"
           style={{
+            zIndex: topOverlayBaseZ + 25,
             width: eraserRadius * 2 * viewport.zoom,
             height: eraserRadius * 2 * viewport.zoom,
             left: eraserCursorPos.x - eraserRadius * viewport.zoom,
@@ -2205,11 +3262,12 @@ export const BoardView: React.FC<BoardViewProps> = ({
       )}
 
       {/* Shape Placement Ghost Preview & Two-Point Custom Line Preview */}
-      {activeTool === 'shape' && (isShapeCursorVisible || lineDraftStart) && (
+      {activeTool === 'shape' && activeShapeType && (isShapeCursorVisible || lineDraftStart) && (
         activeShapeType === 'line-custom' ? (
           lineDraftStart ? (
             <svg
-              className="absolute inset-0 pointer-events-none z-40"
+              className="absolute inset-0 pointer-events-none"
+              style={{ zIndex: topOverlayBaseZ + 15 }}
               width={containerSize.width}
               height={containerSize.height}
             >
@@ -2258,8 +3316,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
           ) : (
             <div
               ref={customLineCursorDotRef}
-              className="absolute pointer-events-none z-40 w-2.5 h-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow"
+              className="absolute pointer-events-none w-2.5 h-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow"
               style={{
+                zIndex: topOverlayBaseZ + 15,
                 left: `${shapeCursorPosRef.current?.screenX ?? -100}px`,
                 top: `${shapeCursorPosRef.current?.screenY ?? -100}px`,
                 backgroundColor: shapeColor,
@@ -2269,8 +3328,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
         ) : (
           <div
             ref={shapeGhostPreviewRef}
-            className="absolute pointer-events-none z-40 opacity-40 transition-none"
+            className="absolute pointer-events-none opacity-40 transition-none"
             style={{
+              zIndex: topOverlayBaseZ + 15,
               left: `${
                 (shapeCursorPosRef.current?.screenX ?? -1000) -
                 ((SHAPE_MAP.get(activeShapeType)?.defaultWidth || 120) * viewport.zoom) / 2
@@ -2300,8 +3360,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
       {/* Marquee Area Selection DOM Overlay */}
       {marqueeRect && (
         <div
-          className="absolute pointer-events-none z-20 border border-black border-dashed bg-black/[0.06] rounded-[2px]"
+          className="absolute pointer-events-none border border-black border-dashed bg-black/[0.06] rounded-[2px]"
           style={{
+            zIndex: topOverlayBaseZ + 5,
             left: Math.min(marqueeRect.startX, marqueeRect.currentX) * viewport.zoom + viewport.x,
             top: Math.min(marqueeRect.startY, marqueeRect.currentY) * viewport.zoom + viewport.y,
             width: Math.abs(marqueeRect.currentX - marqueeRect.startX) * viewport.zoom,
@@ -2310,13 +3371,14 @@ export const BoardView: React.FC<BoardViewProps> = ({
         />
       )}
 
-      {/* Layer 3: Shape Objects */}
+      {/* Shape Objects (ordered dynamically via zIndexMap) */}
       {shapes.map((shp) => (
         <BoardShapeElement
           key={shp.id}
           shape={shp}
           viewport={viewport}
           isInteractive={activeTool === 'select'}
+          zIndex={zIndexMap.get(`shape:${shp.id}`) ?? 1}
           onSelect={(e) => {
             if (activeTool === 'select') {
               startDirectObjectDrag({ type: 'shape', id: shp.id }, e);
@@ -2325,7 +3387,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
         />
       ))}
 
-      {/* Layer 4: Text Objects */}
+      {/* Text Objects (ordered dynamically via zIndexMap) */}
       {texts.map((txt) => {
         const isSelected = selectedItems.some((i) => i.id === txt.id);
         const hasStrokes = selectedItems.some((i) => i.type === 'stroke');
@@ -2341,10 +3403,12 @@ export const BoardView: React.FC<BoardViewProps> = ({
             isSelected={isSelected}
             isInGroup={isInGroup}
             isEditingDirectly={editingTextId === txt.id}
-            isEraserActive={activeTool === 'eraser' || activeTool === 'shape'}
+            isEraserActive={activeTool === 'eraser' || activeTool === 'shape' || activeTool === 'fill'}
             zoom={viewport.zoom}
             viewportX={viewport.x}
             viewportY={viewport.y}
+            zIndex={zIndexMap.get(`text:${txt.id}`) ?? 1}
+            editingZIndex={topOverlayBaseZ + 20}
             onSelect={(e) => {
               if (activeTool === 'select') {
                 startDirectObjectDrag({ type: 'text', id: txt.id }, e);
@@ -2364,7 +3428,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
         );
       })}
 
-      {/* Layer 5: Selection Controls (Handles for Resize, Rotation, Move, Delete - only active in select mode) */}
+      {/* Selection Controls (Handles for Resize, Rotation, Move, Delete - only active in select mode) */}
       {activeTool === 'select' && (
         <BoardControls
           selectedItems={selectedItems}
@@ -2376,6 +3440,8 @@ export const BoardView: React.FC<BoardViewProps> = ({
           zoom={viewport.zoom}
           viewportX={viewport.x}
           viewportY={viewport.y}
+          zIndex={topOverlayBaseZ + 10}
+          onTrySelectHigherObject={handleTrySelectHigherObject}
           onUpdateImage={handleUpdateImage}
           onUpdateTextPos={handleUpdateTextPos}
           onUpdateStrokePoints={handleUpdateStrokePoints}

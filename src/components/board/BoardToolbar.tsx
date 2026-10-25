@@ -4,6 +4,7 @@ import {
   MousePointer,
   Hand,
   Pen,
+  PaintBucket,
   Eraser,
   Type,
   Shapes,
@@ -14,7 +15,7 @@ import {
   Minus,
   Plus,
 } from 'lucide-react';
-import { SHAPE_DEFINITIONS, SHAPE_MAP, ShapeIcon } from './shapeDefinitions';
+import { SHAPE_DEFINITIONS, ShapeIcon } from './shapeDefinitions';
 
 interface BoardToolbarProps {
   activeTool: BoardTool;
@@ -28,11 +29,13 @@ interface BoardToolbarProps {
   onChangeColor: (color: string) => void;
   strokeWidth: number;
   onChangeStrokeWidth: (width: number) => void;
+  fillColor: string;
+  onChangeFillColor: (color: string) => void;
   textColor: string;
   onChangeTextColor: (color: string) => void;
   textFontSize: number;
   onChangeTextFontSize: (size: number) => void;
-  selectedShapeType: ShapeType;
+  selectedShapeType: ShapeType | null;
   onSelectShapeType: (type: ShapeType) => void;
   shapeColor: string;
   onChangeShapeColor: (color: string) => void;
@@ -42,6 +45,8 @@ interface BoardToolbarProps {
   onChangeEraserRadius: (radius: number) => void;
   selectedCount: number;
   onDeleteSelected: () => void;
+  showBringForward?: boolean;
+  onBringForward?: () => void;
   zoomPercent: number;
   onZoomIn: () => void;
   onZoomOut: () => void;
@@ -50,6 +55,24 @@ interface BoardToolbarProps {
   toolbarRef?: React.RefObject<HTMLDivElement | null>;
   containerWidth?: number;
 }
+
+/* Vector icon in Persona / Lucide style: stacked layers with an upward arrow ("Переместить вперёд") */
+const BringForwardIcon: React.FC<{ className?: string }> = ({ className = 'w-4 h-4' }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+  >
+    <path d="M12 13V3" />
+    <path d="m8 7 4-4 4 4" />
+    <path d="m4 14 8 4 8-4" />
+    <path d="m4 18 8 4 8-4" />
+  </svg>
+);
 
 // 12 functional colors
 const COLOR_PALETTE = [
@@ -79,6 +102,8 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
   onChangeColor,
   strokeWidth,
   onChangeStrokeWidth,
+  fillColor,
+  onChangeFillColor,
   textColor,
   onChangeTextColor,
   textFontSize,
@@ -93,6 +118,8 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
   onChangeEraserRadius,
   selectedCount,
   onDeleteSelected,
+  showBringForward = false,
+  onBringForward,
   zoomPercent,
   onZoomIn,
   onZoomOut,
@@ -102,43 +129,48 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
   containerWidth = 1280,
 }) => {
   const [isColorPickerOpen, setIsColorPickerOpen] = useState(false);
+  const [isFillColorPickerOpen, setIsFillColorPickerOpen] = useState(false);
   const [isTextColorPickerOpen, setIsTextColorPickerOpen] = useState(false);
   const [isShapesMenuOpen, setIsShapesMenuOpen] = useState(false);
-  const [isShapeColorPickerOpen, setIsShapeColorPickerOpen] = useState(false);
 
   const colorPickerRef = useRef<HTMLDivElement | null>(null);
+  const fillColorPickerRef = useRef<HTMLDivElement | null>(null);
   const textColorPickerRef = useRef<HTMLDivElement | null>(null);
   const shapesMenuRef = useRef<HTMLDivElement | null>(null);
-  const shapeColorPickerRef = useRef<HTMLDivElement | null>(null);
 
-  // Close color popovers when switching active tool so collapsing sub-toolbars clip cleanly
+  // Close popovers when switching active tool so collapsing sub-toolbars clip cleanly
+  // and Shapes menu never remains open when another tool becomes active
   useEffect(() => {
     setIsColorPickerOpen(false);
+    setIsFillColorPickerOpen(false);
     setIsTextColorPickerOpen(false);
-    setIsShapeColorPickerOpen(false);
+    if (activeTool !== 'shape') {
+      setIsShapesMenuOpen(false);
+    }
   }, [activeTool]);
 
-  // Close popovers on outside click
+  // Close popovers on outside click (capture phase so toolbar stopPropagation does not block it)
   useEffect(() => {
     const handleOutsideClick = (e: MouseEvent) => {
-      if (colorPickerRef.current && !colorPickerRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (colorPickerRef.current && !colorPickerRef.current.contains(target)) {
         setIsColorPickerOpen(false);
       }
-      if (textColorPickerRef.current && !textColorPickerRef.current.contains(e.target as Node)) {
+      if (fillColorPickerRef.current && !fillColorPickerRef.current.contains(target)) {
+        setIsFillColorPickerOpen(false);
+      }
+      if (textColorPickerRef.current && !textColorPickerRef.current.contains(target)) {
         setIsTextColorPickerOpen(false);
       }
-      if (shapesMenuRef.current && !shapesMenuRef.current.contains(e.target as Node)) {
+      if (shapesMenuRef.current && !shapesMenuRef.current.contains(target)) {
         setIsShapesMenuOpen(false);
       }
-      if (shapeColorPickerRef.current && !shapeColorPickerRef.current.contains(e.target as Node)) {
-        setIsShapeColorPickerOpen(false);
-      }
     };
-    if (isColorPickerOpen || isTextColorPickerOpen || isShapesMenuOpen || isShapeColorPickerOpen) {
-      window.addEventListener('mousedown', handleOutsideClick);
+    if (isColorPickerOpen || isFillColorPickerOpen || isTextColorPickerOpen || isShapesMenuOpen) {
+      window.addEventListener('mousedown', handleOutsideClick, true);
     }
-    return () => window.removeEventListener('mousedown', handleOutsideClick);
-  }, [isColorPickerOpen, isTextColorPickerOpen, isShapesMenuOpen, isShapeColorPickerOpen]);
+    return () => window.removeEventListener('mousedown', handleOutsideClick, true);
+  }, [isColorPickerOpen, isFillColorPickerOpen, isTextColorPickerOpen, isShapesMenuOpen]);
 
   // Stop pointer events from propagating to the canvas underneath
   const stopPointer = (e: React.PointerEvent | React.MouseEvent | React.SyntheticEvent) => {
@@ -148,19 +180,24 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
   // Adaptive breakpoints based on actual board viewport width:
   // - Below 700px: active tool sub-toolbar & delete button move to a centered second pill below the main bar
   //   so the main toolbar never overflows its dark container or collides with window edges.
-  // - Below 475px (down to minWidth 360px): button sizes and gaps compact so all 7 tools + Undo/Redo + Zoom fit cleanly.
+  // - Below 515px (down to minWidth 360px): button sizes and gaps compact so all 8 tools + Undo/Redo + Zoom fit cleanly.
   const isStackedSubToolbar = containerWidth < 700;
-  const isCompactBar = containerWidth < 475;
+  const isCompactBar = containerWidth < 545;
+  const isUltraCompactBar = containerWidth < 400;
   const hasSecondaryControls =
     activeTool === 'pen' ||
-    activeTool === 'shape' ||
+    activeTool === 'fill' ||
     activeTool === 'text' ||
     activeTool === 'eraser' ||
     selectedCount > 0;
 
   const toolBtnClass = (isActive: boolean) =>
     `${
-      isCompactBar ? 'w-[26px] h-[26px] rounded-lg' : 'p-2 rounded-xl'
+      isUltraCompactBar
+        ? 'w-[23px] h-[23px] rounded-lg'
+        : isCompactBar
+        ? 'w-[25px] h-[25px] rounded-lg'
+        : 'p-2 rounded-xl'
     } text-xs flex items-center justify-center transition-colors duration-150 cursor-pointer ${
       isActive
         ? 'bg-white text-black font-semibold shadow-sm'
@@ -243,30 +280,18 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
     </div>
   );
 
-  const renderShapeControls = () => (
+  const renderFillControls = () => (
     <div className="flex items-center gap-2 shrink-0 cursor-default">
-      {/* Quick Shape Selector Button */}
-      <button
-        onClick={() => setIsShapesMenuOpen((prev) => !prev)}
-        title="Выбрать другую фигуру"
-        className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/[0.08] text-xs transition-all cursor-pointer text-white"
-      >
-        <ShapeIcon type={selectedShapeType} className="w-4 h-4 text-white" />
-        <span className="text-[11px] font-medium max-w-[85px] truncate">
-          {SHAPE_MAP.get(selectedShapeType)?.label || 'Фигура'}
-        </span>
-      </button>
-
-      {/* Dedicated Shape Color Picker */}
-      <div className="relative cursor-default" ref={!isStackedSubToolbar ? shapeColorPickerRef : undefined}>
+      {/* Fill Color Picker Button & Popover */}
+      <div className="relative cursor-default" ref={!isStackedSubToolbar ? fillColorPickerRef : undefined}>
         <button
-          onClick={() => setIsShapeColorPickerOpen((prev) => !prev)}
-          title="Выбор цвета фигуры"
+          onClick={() => setIsFillColorPickerOpen((prev) => !prev)}
+          title="Выбор цвета заливки"
           className="w-6 h-6 rounded-full border-2 border-white/40 hover:border-white transition-all flex items-center justify-center shadow-inner focus:outline-none cursor-pointer"
-          style={{ backgroundColor: shapeColor }}
+          style={{ backgroundColor: fillColor }}
         />
 
-        {isShapeColorPickerOpen && (
+        {isFillColorPickerOpen && (
           <div
             onPointerDown={stopPointer}
             onPointerMove={stopPointer}
@@ -281,12 +306,12 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
               <button
                 key={c.value}
                 onClick={() => {
-                  onChangeShapeColor(c.value);
-                  setIsShapeColorPickerOpen(false);
+                  onChangeFillColor(c.value);
+                  setIsFillColorPickerOpen(false);
                 }}
                 title={c.label}
                 className={`w-6 h-6 rounded-full transition-transform cursor-pointer ${
-                  shapeColor === c.value
+                  fillColor === c.value
                     ? 'ring-2 ring-white scale-110'
                     : 'hover:scale-110 opacity-90 hover:opacity-100'
                 }`}
@@ -465,6 +490,39 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
           isCompactBar ? 'p-1 rounded-xl' : 'p-1.5 rounded-2xl'
         } bg-[#0c0c0c] border border-white/[0.12] shadow-2xl backdrop-blur-md text-white pointer-events-auto cursor-default`}
       >
+        {/* Left-Side Bring Forward Button (Smoothly expands only when Select tool has 1 object selected) */}
+        <div
+          className={`grid transition-[grid-template-columns,opacity,margin] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] cursor-default ${
+            showBringForward
+              ? `grid-cols-[1fr] opacity-100 ${isCompactBar ? 'mr-0.5' : 'mr-1'}`
+              : 'grid-cols-[0fr] opacity-0 pointer-events-none m-0'
+          }`}
+        >
+          <div className="flex items-center min-w-0 overflow-hidden">
+            <button
+              type="button"
+              onClick={onBringForward}
+              tabIndex={showBringForward ? 0 : -1}
+              title="Переместить вперёд"
+              aria-label="Переместить вперёд"
+              className={`${
+                isUltraCompactBar
+                  ? 'w-[23px] h-[23px] rounded-lg'
+                  : isCompactBar
+                  ? 'w-[25px] h-[25px] rounded-lg'
+                  : 'p-2 rounded-xl'
+              } text-xs flex items-center justify-center transition-colors duration-150 text-neutral-400 hover:text-white hover:bg-white/[0.08] cursor-pointer shrink-0`}
+            >
+              <BringForwardIcon className={toolIconClass} />
+            </button>
+            <div
+              className={`w-[1px] ${
+                isCompactBar ? 'h-4 ml-0.5' : 'h-5 ml-1'
+              } bg-white/[0.1] shrink-0 cursor-default`}
+            />
+          </div>
+        </div>
+
         {/* Primary Tools */}
         <div className={`flex items-center ${isCompactBar ? 'gap-0.5' : 'gap-1'} shrink-0`}>
           <button
@@ -492,6 +550,14 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
           </button>
 
           <button
+            onClick={() => onChangeTool('fill')}
+            title="Заливка / Fill (G)"
+            className={toolBtnClass(activeTool === 'fill')}
+          >
+            <PaintBucket className={toolIconClass} />
+          </button>
+
+          <button
             onClick={() => onChangeTool('eraser')}
             title="Ластик / Eraser (E)"
             className={toolBtnClass(activeTool === 'eraser')}
@@ -503,10 +569,15 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
           <div className="relative" ref={shapesMenuRef}>
             <button
               onClick={() => {
-                setIsShapesMenuOpen((prev) => !prev);
+                if (activeTool !== 'shape') {
+                  onChangeTool('shape');
+                  setIsShapesMenuOpen(true);
+                } else {
+                  setIsShapesMenuOpen((prev) => !prev);
+                }
               }}
               title="Фигуры / Shapes"
-              className={toolBtnClass(activeTool === 'shape' || isShapesMenuOpen)}
+              className={toolBtnClass(activeTool === 'shape')}
             >
               <Shapes className={toolIconClass} />
             </button>
@@ -564,11 +635,15 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
                 {/* 24 Shapes Grid: 6 columns x 4 rows */}
                 <div className="grid grid-cols-6 gap-1">
                   {SHAPE_DEFINITIONS.map((def) => {
-                    const isSelected = activeTool === 'shape' && selectedShapeType === def.type;
+                    const isSelected =
+                      activeTool === 'shape' &&
+                      selectedShapeType !== null &&
+                      selectedShapeType === def.type;
                     return (
                       <button
                         key={def.type}
-                        onClick={() => {
+                        onClick={(e) => {
+                          e.currentTarget.blur();
                           onSelectShapeType(def.type);
                           onChangeTool('shape');
                           setIsShapesMenuOpen(false);
@@ -627,23 +702,23 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
               </div>
             </div>
 
-            {/* SHAPES SUB-TOOLBAR */}
+            {/* FILL SUB-TOOLBAR */}
             <div
               className={`grid transition-[grid-template-columns,opacity,margin] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] cursor-default ${
-                activeTool === 'shape'
+                activeTool === 'fill'
                   ? 'grid-cols-[1fr] opacity-100 ml-1.5 mr-0.5'
                   : 'grid-cols-[0fr] opacity-0 pointer-events-none m-0'
               }`}
             >
               <div
                 className={`flex items-center min-w-0 ${
-                  activeTool === 'shape' && isShapeColorPickerOpen
+                  activeTool === 'fill' && isFillColorPickerOpen
                     ? 'overflow-visible'
                     : 'overflow-hidden'
                 }`}
               >
                 <div className="w-[1px] h-5 bg-white/[0.1] shrink-0 mr-2 cursor-default" />
-                {renderShapeControls()}
+                {renderFillControls()}
               </div>
             </div>
 
@@ -708,7 +783,7 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
             disabled={!canUndo}
             title="Отмена / Undo (Ctrl+Z)"
             className={`${
-              isCompactBar ? 'w-[26px] h-[26px] rounded-lg' : 'p-2 rounded-xl'
+              isCompactBar ? 'w-[25px] h-[25px] rounded-lg' : 'p-2 rounded-xl'
             } text-xs flex items-center justify-center transition-colors duration-150 ${
               canUndo
                 ? 'text-neutral-400 hover:text-white hover:bg-white/[0.08] cursor-pointer'
@@ -723,7 +798,7 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
             disabled={!canRedo}
             title="Повтор / Redo (Ctrl+Shift+Z)"
             className={`${
-              isCompactBar ? 'w-[26px] h-[26px] rounded-lg' : 'p-2 rounded-xl'
+              isCompactBar ? 'w-[25px] h-[25px] rounded-lg' : 'p-2 rounded-xl'
             } text-xs flex items-center justify-center transition-colors duration-150 ${
               canRedo
                 ? 'text-neutral-400 hover:text-white hover:bg-white/[0.08] cursor-pointer'
@@ -783,19 +858,19 @@ export const BoardToolbar: React.FC<BoardToolbarProps> = ({
         <div
           ref={(el) => {
             if (activeTool === 'pen') colorPickerRef.current = el;
-            else if (activeTool === 'shape') shapeColorPickerRef.current = el;
+            else if (activeTool === 'fill') fillColorPickerRef.current = el;
             else if (activeTool === 'text') textColorPickerRef.current = el;
           }}
           className="flex items-center gap-2 px-2.5 py-1.5 rounded-2xl bg-[#0c0c0c]/95 border border-white/[0.12] shadow-2xl backdrop-blur-md text-white pointer-events-auto cursor-default animate-in fade-in slide-in-from-top-1 duration-150"
         >
           {activeTool === 'pen' && renderPenControls()}
-          {activeTool === 'shape' && renderShapeControls()}
+          {activeTool === 'fill' && renderFillControls()}
           {activeTool === 'text' && renderTextControls()}
           {activeTool === 'eraser' && renderEraserControls()}
           {selectedCount > 0 && (
             <>
               {(activeTool === 'pen' ||
-                activeTool === 'shape' ||
+                activeTool === 'fill' ||
                 activeTool === 'text' ||
                 activeTool === 'eraser') && (
                 <div className="w-[1px] h-5 bg-white/[0.1] shrink-0 cursor-default" />

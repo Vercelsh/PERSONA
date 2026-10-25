@@ -9,6 +9,7 @@ interface BoardImageElementProps {
   viewportX: number;
   viewportY: number;
   isEraserActive?: boolean;
+  zIndex?: number;
   onSelect: (e: React.PointerEvent) => void;
 }
 
@@ -19,6 +20,7 @@ export const BoardImageElement: React.FC<BoardImageElementProps> = ({
   viewportX,
   viewportY,
   isEraserActive = false,
+  zIndex,
   onSelect,
 }) => {
   const [src, setSrc] = useState<string | null>(image.dataUrl || null);
@@ -55,8 +57,8 @@ export const BoardImageElement: React.FC<BoardImageElementProps> = ({
       onPointerDown={isEraserActive ? undefined : onSelect}
       className={`absolute select-none ${
         isEraserActive
-          ? 'pointer-events-none z-0'
-          : `group cursor-pointer transition-shadow ${isSelected ? 'z-10' : 'z-0'}`
+          ? 'pointer-events-none'
+          : 'group cursor-pointer transition-shadow'
       }`}
       style={{
         left: screenX,
@@ -65,6 +67,7 @@ export const BoardImageElement: React.FC<BoardImageElementProps> = ({
         height: screenH,
         transform: `rotate(${image.rotation || 0}deg)`,
         transformOrigin: 'center center',
+        zIndex: zIndex ?? (isSelected ? 10 : 0),
       }}
     >
       {src ? (

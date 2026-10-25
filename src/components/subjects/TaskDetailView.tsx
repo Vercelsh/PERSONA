@@ -10,6 +10,7 @@ import {
   ImageIcon,
   RefreshCw,
   Plus,
+  Pen,
 } from 'lucide-react';
 
 interface TaskDetailViewProps {
@@ -20,6 +21,7 @@ interface TaskDetailViewProps {
   onSave: (updatedTask: TaskItem) => Promise<void>;
   onDelete: (taskId: string) => Promise<void>;
   onSelectTask: (taskId: string) => void;
+  onOpenBoard: (subjectId: string, taskId: string) => void;
 }
 
 const readFileAsDataUrl = (file: File): Promise<string> => {
@@ -39,6 +41,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
   onSave,
   onDelete,
   onSelectTask,
+  onOpenBoard,
 }) => {
   const [title, setTitle] = useState(task.title);
   const [notes, setNotes] = useState(task.notes);
@@ -364,6 +367,11 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     onBack();
   };
 
+  const handleOpenBoard = async () => {
+    await flushSave();
+    onOpenBoard(subject.id, task.id);
+  };
+
   const currentIndex = allTasks.findIndex((t) => t.id === task.id);
   const prevTask = currentIndex > 0 ? allTasks[currentIndex - 1] : null;
   const nextTask = currentIndex < allTasks.length - 1 ? allTasks[currentIndex + 1] : null;
@@ -385,20 +393,32 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Save Status Indicator */}
-          <div className="flex items-center gap-1.5 text-xs font-mono text-neutral-400">
-            {saveStatus === 'saved' && (
-              <>
-                <Check className="w-3.5 h-3.5 text-neutral-400" />
-                <span>Сохранено локально</span>
-              </>
-            )}
-            {saveStatus === 'saving' && (
-              <span className="animate-pulse text-neutral-400">Сохранение...</span>
-            )}
-            {saveStatus === 'unsaved' && (
-              <span className="text-neutral-500">Несохранённые правки</span>
-            )}
+          {/* Save Status Indicator + Quick Board Button */}
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 text-xs font-mono text-neutral-400">
+              {saveStatus === 'saved' && (
+                <>
+                  <Check className="w-3.5 h-3.5 text-neutral-400" />
+                  <span>Сохранено локально</span>
+                </>
+              )}
+              {saveStatus === 'saving' && (
+                <span className="animate-pulse text-neutral-400">Сохранение...</span>
+              )}
+              {saveStatus === 'unsaved' && (
+                <span className="text-neutral-500">Несохранённые правки</span>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={handleOpenBoard}
+              title="Открыть доску задания"
+              aria-label="Открыть доску задания"
+              className="p-1.5 rounded text-neutral-400 hover:text-white hover:bg-white/[0.04] transition-colors cursor-pointer"
+            >
+              <Pen className="w-4 h-4" />
+            </button>
           </div>
 
           {/* Quick Prev / Next navigation */}

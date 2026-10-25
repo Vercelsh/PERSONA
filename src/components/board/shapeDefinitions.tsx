@@ -1,5 +1,6 @@
 import React from 'react';
-import { ShapeType } from '../../types';
+import { BoardPoint, BoardShapeObject, ShapeErasedStroke, ShapeType } from '../../types';
+import { pointInPolygon } from './fillUtils';
 
 export interface ShapeDefinition {
   type: ShapeType;
@@ -45,251 +46,86 @@ export const getShapeDefinition = (type: ShapeType): ShapeDefinition => {
 };
 
 /**
- * Renders the SVG content for a given shape at target world dimensions (width, height)
- * and effective screen strokeWidth.
+ * Computes polygon vertices for polygon-based 2D shapes in local shape coordinates [0..w, 0..h].
  */
-export const renderShapeSvg = (
+function getPolygonShapeVertices(
   type: ShapeType,
-  width: number,
-  height: number,
-  color: string,
-  strokeWidth: number = 2.5,
-  worldStrokePadding: number = 2.5
-): React.ReactNode => {
-  const p = Math.max(2, worldStrokePadding / 2); // padding in world coordinates to prevent stroke clipping
-  const w = Math.max(10, width);
-  const h = Math.max(10, height);
-  const innerW = Math.max(2, w - p * 2);
-  const innerH = Math.max(2, h - p * 2);
-
+  w: number,
+  h: number,
+  p: number,
+  innerW: number,
+  innerH: number
+): BoardPoint[] | null {
   switch (type) {
-    case 'square':
-      return (
-        <rect
-          x={p}
-          y={p}
-          width={innerW}
-          height={innerH}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          vectorEffect="non-scaling-stroke"
-        />
-      );
-
-    case 'rectangle':
-      return (
-        <rect
-          x={p}
-          y={p}
-          width={innerW}
-          height={innerH}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          vectorEffect="non-scaling-stroke"
-        />
-      );
-
-    case 'rounded-rectangle': {
-      const rx = Math.min(16, innerW / 4, innerH / 4);
-      return (
-        <rect
-          x={p}
-          y={p}
-          width={innerW}
-          height={innerH}
-          rx={rx}
-          ry={rx}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          vectorEffect="non-scaling-stroke"
-        />
-      );
-    }
-
-    case 'circle': {
-      const r = Math.max(2, Math.min(innerW, innerH) / 2);
-      return (
-        <circle
-          cx={w / 2}
-          cy={h / 2}
-          r={r}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          vectorEffect="non-scaling-stroke"
-        />
-      );
-    }
-
-    case 'ellipse':
-      return (
-        <ellipse
-          cx={w / 2}
-          cy={h / 2}
-          rx={Math.max(2, innerW / 2)}
-          ry={Math.max(2, innerH / 2)}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          vectorEffect="non-scaling-stroke"
-        />
-      );
-
-    case 'triangle': {
-      const pts = `${w / 2},${p} ${w - p},${h - p} ${p},${h - p}`;
-      return (
-        <polygon
-          points={pts}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      );
-    }
-
-    case 'right-triangle': {
-      const pts = `${p},${p} ${w - p},${h - p} ${p},${h - p}`;
-      return (
-        <polygon
-          points={pts}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      );
-    }
-
-    case 'right-triangle-flipped': {
-      const pts = `${w - p},${p} ${w - p},${h - p} ${p},${h - p}`;
-      return (
-        <polygon
-          points={pts}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      );
-    }
-
-    case 'cube': {
-      // Oblique 3D cube
-      const ox = w * 0.28;
-      const oy = h * 0.28;
-      const fw = Math.max(2, w - ox - p * 2);
-      const fh = Math.max(2, h - oy - p * 2);
-      const fx = p;
-      const fy = p + oy;
-
-      return (
-        <g stroke={color} strokeWidth={strokeWidth} fill="transparent" strokeLinejoin="round" strokeLinecap="round">
-          {/* Front Face */}
-          <rect x={fx} y={fy} width={fw} height={fh} vectorEffect="non-scaling-stroke" />
-          {/* Top Face */}
-          <polygon
-            points={`${fx},${fy} ${fx + ox},${fy - oy} ${fx + fw + ox},${fy - oy} ${fx + fw},${fy}`}
-            vectorEffect="non-scaling-stroke"
-          />
-          {/* Right Face */}
-          <polygon
-            points={`${fx + fw},${fy} ${fx + fw + ox},${fy - oy} ${fx + fw + ox},${fy + fh - oy} ${fx + fw},${fy + fh}`}
-            vectorEffect="non-scaling-stroke"
-          />
-        </g>
-      );
-    }
-
-    case 'rhombus': {
-      const pts = `${w / 2},${p} ${w - p},${h / 2} ${w / 2},${h - p} ${p},${h / 2}`;
-      return (
-        <polygon
-          points={pts}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      );
-    }
-
+    case 'triangle':
+      return [
+        { x: w / 2, y: p },
+        { x: w - p, y: h - p },
+        { x: p, y: h - p },
+      ];
+    case 'right-triangle':
+      return [
+        { x: p, y: p },
+        { x: w - p, y: h - p },
+        { x: p, y: h - p },
+      ];
+    case 'right-triangle-flipped':
+      return [
+        { x: w - p, y: p },
+        { x: w - p, y: h - p },
+        { x: p, y: h - p },
+      ];
+    case 'rhombus':
+      return [
+        { x: w / 2, y: p },
+        { x: w - p, y: h / 2 },
+        { x: w / 2, y: h - p },
+        { x: p, y: h / 2 },
+      ];
     case 'trapezoid': {
       const topOffset = innerW * 0.22;
-      const pts = `${p + topOffset},${p} ${w - p - topOffset},${p} ${w - p},${h - p} ${p},${h - p}`;
-      return (
-        <polygon
-          points={pts}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      );
+      return [
+        { x: p + topOffset, y: p },
+        { x: w - p - topOffset, y: p },
+        { x: w - p, y: h - p },
+        { x: p, y: h - p },
+      ];
     }
-
     case 'parallelogram': {
       const shift = innerW * 0.25;
-      const pts = `${p + shift},${p} ${w - p},${p} ${w - p - shift},${h - p} ${p},${h - p}`;
-      return (
-        <polygon
-          points={pts}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      );
+      return [
+        { x: p + shift, y: p },
+        { x: w - p, y: p },
+        { x: w - p - shift, y: h - p },
+        { x: p, y: h - p },
+      ];
     }
-
     case 'pentagon': {
       const cx = w / 2;
       const cy = h / 2;
       const rx = innerW / 2;
       const ry = innerH / 2;
-      const points: string[] = [];
+      const pts: BoardPoint[] = [];
       for (let i = 0; i < 5; i++) {
         const angle = -Math.PI / 2 + (i * 2 * Math.PI) / 5;
-        const px = cx + rx * Math.cos(angle);
-        const py = cy + ry * Math.sin(angle);
-        points.push(`${px.toFixed(1)},${py.toFixed(1)}`);
+        pts.push({
+          x: cx + rx * Math.cos(angle),
+          y: cy + ry * Math.sin(angle),
+        });
       }
-      return (
-        <polygon
-          points={points.join(' ')}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      );
+      return pts;
     }
-
     case 'hexagon': {
       const inset = innerW * 0.25;
-      const pts = `${p + inset},${p} ${w - p - inset},${p} ${w - p},${h / 2} ${w - p - inset},${h - p} ${p + inset},${h - p} ${p},${h / 2}`;
-      return (
-        <polygon
-          points={pts}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      );
+      return [
+        { x: p + inset, y: p },
+        { x: w - p - inset, y: p },
+        { x: w - p, y: h / 2 },
+        { x: w - p - inset, y: h - p },
+        { x: p + inset, y: h - p },
+        { x: p, y: h / 2 },
+      ];
     }
-
     case 'star': {
       const cx = w / 2;
       const cy = h / 2;
@@ -297,24 +133,444 @@ export const renderShapeSvg = (
       const rOuterY = innerH / 2;
       const rInnerX = rOuterX * 0.45;
       const rInnerY = rOuterY * 0.45;
-      const points: string[] = [];
+      const pts: BoardPoint[] = [];
       for (let i = 0; i < 10; i++) {
         const angle = -Math.PI / 2 + (i * Math.PI) / 5;
         const rx = i % 2 === 0 ? rOuterX : rInnerX;
         const ry = i % 2 === 0 ? rOuterY : rInnerY;
-        const px = cx + rx * Math.cos(angle);
-        const py = cy + ry * Math.sin(angle);
-        points.push(`${px.toFixed(1)},${py.toFixed(1)}`);
+        pts.push({
+          x: cx + rx * Math.cos(angle),
+          y: cy + ry * Math.sin(angle),
+        });
       }
+      return pts;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Computes the 3 visible faces of a 3D oblique cube in local shape coordinates [0..w, 0..h].
+ */
+function getCubeFacesGeometry(w: number, h: number, p: number) {
+  const ox = w * 0.28;
+  const oy = h * 0.28;
+  const fw = Math.max(2, w - ox - p * 2);
+  const fh = Math.max(2, h - oy - p * 2);
+  const fx = p;
+  const fy = p + oy;
+
+  const frontPoly: BoardPoint[] = [
+    { x: fx, y: fy },
+    { x: fx + fw, y: fy },
+    { x: fx + fw, y: fy + fh },
+    { x: fx, y: fy + fh },
+  ];
+  const topPoly: BoardPoint[] = [
+    { x: fx, y: fy },
+    { x: fx + ox, y: fy - oy },
+    { x: fx + fw + ox, y: fy - oy },
+    { x: fx + fw, y: fy },
+  ];
+  const rightPoly: BoardPoint[] = [
+    { x: fx + fw, y: fy },
+    { x: fx + fw + ox, y: fy - oy },
+    { x: fx + fw + ox, y: fy + fh - oy },
+    { x: fx + fw, y: fy + fh },
+  ];
+
+  return { fx, fy, fw, fh, ox, oy, frontPoly, topPoly, rightPoly };
+}
+
+/**
+ * Transforms a world coordinate (worldX, worldY) into the shape's local unrotated coordinate system [0..width, 0..height].
+ */
+export function worldToShapeLocal(
+  shape: BoardShapeObject,
+  worldX: number,
+  worldY: number
+): BoardPoint {
+  const cx = shape.x + shape.width / 2;
+  const cy = shape.y + shape.height / 2;
+  const rad = -((shape.rotation || 0) * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const dx = worldX - cx;
+  const dy = worldY - cy;
+  return {
+    x: dx * cos - dy * sin + shape.width / 2,
+    y: dx * sin + dy * cos + shape.height / 2,
+  };
+}
+
+/**
+ * Exact geometric hit-test for the Fill Tool on a BoardShapeObject.
+ * For 2D closed shapes, returns { hit: true } if inside the closed shape boundary.
+ * For 3D volumetric shapes ('cube'), returns { hit: true, faceId } for the specific clicked face.
+ * For open lines / arrows, returns { hit: false }.
+ */
+export function hitTestShapeFill(
+  shape: BoardShapeObject,
+  worldX: number,
+  worldY: number
+): { hit: boolean; faceId?: 'front' | 'top' | 'right' } {
+  const local = worldToShapeLocal(shape, worldX, worldY);
+  const lx = local.x;
+  const ly = local.y;
+
+  const w = Math.max(10, shape.width);
+  const h = Math.max(10, shape.height);
+  const p = Math.max(2, (shape.strokeWidth || 2.5) / 2);
+  const innerW = Math.max(2, w - p * 2);
+  const innerH = Math.max(2, h - p * 2);
+
+  if (lx < 0 || lx > w || ly < 0 || ly > h) {
+    return { hit: false };
+  }
+
+  switch (shape.type) {
+    case 'square':
+    case 'rectangle':
+      return {
+        hit: lx >= p && lx <= p + innerW && ly >= p && ly <= p + innerH,
+      };
+
+    case 'rounded-rectangle': {
+      if (lx < p || lx > p + innerW || ly < p || ly > p + innerH) {
+        return { hit: false };
+      }
+      const rx = Math.min(16, innerW / 4, innerH / 4);
+      const minX = p + rx;
+      const maxX = p + innerW - rx;
+      const minY = p + rx;
+      const maxY = p + innerH - rx;
+      const cx = lx < minX ? minX : lx > maxX ? maxX : lx;
+      const cy = ly < minY ? minY : ly > maxY ? maxY : ly;
+      return {
+        hit: Math.hypot(lx - cx, ly - cy) <= rx,
+      };
+    }
+
+    case 'circle': {
+      const r = Math.max(2, Math.min(innerW, innerH) / 2);
+      return {
+        hit: Math.hypot(lx - w / 2, ly - h / 2) <= r,
+      };
+    }
+
+    case 'ellipse': {
+      const rx = Math.max(2, innerW / 2);
+      const ry = Math.max(2, innerH / 2);
+      const norm = Math.pow((lx - w / 2) / rx, 2) + Math.pow((ly - h / 2) / ry, 2);
+      return {
+        hit: norm <= 1,
+      };
+    }
+
+    case 'cube': {
+      const { frontPoly, topPoly, rightPoly } = getCubeFacesGeometry(w, h, p);
+      if (pointInPolygon(local, frontPoly)) {
+        return { hit: true, faceId: 'front' };
+      }
+      if (pointInPolygon(local, topPoly)) {
+        return { hit: true, faceId: 'top' };
+      }
+      if (pointInPolygon(local, rightPoly)) {
+        return { hit: true, faceId: 'right' };
+      }
+      return { hit: false };
+    }
+
+    case 'triangle':
+    case 'right-triangle':
+    case 'right-triangle-flipped':
+    case 'rhombus':
+    case 'trapezoid':
+    case 'parallelogram':
+    case 'pentagon':
+    case 'hexagon':
+    case 'star': {
+      const poly = getPolygonShapeVertices(shape.type, w, h, p, innerW, innerH);
+      if (!poly) return { hit: false };
+      return {
+        hit: pointInPolygon(local, poly),
+      };
+    }
+
+    default:
+      // Lines and open arrows are not closed 2D/3D shapes
+      return { hit: false };
+  }
+}
+
+/**
+ * Renders the SVG mask used when a filled shape has been partially erased by the Area Eraser.
+ */
+function renderErasedFillMask(
+  maskId: string,
+  w: number,
+  h: number,
+  erasedFillStrokes?: ShapeErasedStroke[]
+): React.ReactNode {
+  if (!erasedFillStrokes || erasedFillStrokes.length === 0) return null;
+  return (
+    <defs>
+      <mask id={maskId} maskUnits="userSpaceOnUse" x={0} y={0} width={w} height={h}>
+        <rect x={0} y={0} width={w} height={h} fill="white" />
+        {erasedFillStrokes.map((ep, idx) => {
+          if (!ep.points || ep.points.length === 0) return null;
+          const rx = Math.max(1, ep.radiusRatioX * w);
+          const ry = Math.max(1, ep.radiusRatioY * h);
+          const strokeW = rx + ry;
+          if (ep.points.length === 1) {
+            return (
+              <ellipse
+                key={idx}
+                cx={ep.points[0].x * w}
+                cy={ep.points[0].y * h}
+                rx={rx}
+                ry={ry}
+                fill="black"
+              />
+            );
+          }
+          const d = ep.points
+            .map(
+              (pt, i) =>
+                `${i === 0 ? 'M' : 'L'} ${(pt.x * w).toFixed(2)} ${(pt.y * h).toFixed(2)}`
+            )
+            .join(' ');
+          return (
+            <path
+              key={idx}
+              d={d}
+              fill="none"
+              stroke="black"
+              strokeWidth={strokeW}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          );
+        })}
+      </mask>
+    </defs>
+  );
+}
+
+/**
+ * Renders the SVG content for a given shape at target world dimensions (width, height)
+ * and effective screen strokeWidth, including optional interior fill and partial-erase mask.
+ */
+export const renderShapeSvg = (
+  type: ShapeType,
+  width: number,
+  height: number,
+  color: string,
+  strokeWidth: number = 2.5,
+  worldStrokePadding: number = 2.5,
+  fillColor?: string,
+  faceFills?: Record<string, string>,
+  erasedFillStrokes?: ShapeErasedStroke[],
+  shapeId?: string
+): React.ReactNode => {
+  const p = Math.max(2, worldStrokePadding / 2); // padding in world coordinates to prevent stroke clipping
+  const w = Math.max(10, width);
+  const h = Math.max(10, height);
+  const innerW = Math.max(2, w - p * 2);
+  const innerH = Math.max(2, h - p * 2);
+
+  const hasErasedMask = Boolean(erasedFillStrokes && erasedFillStrokes.length > 0);
+  const maskId = `shape-fill-mask-${shapeId || 'preview'}`;
+  const maskAttr = hasErasedMask ? `url(#${maskId})` : undefined;
+
+  switch (type) {
+    case 'square':
+    case 'rectangle':
       return (
-        <polygon
-          points={points.join(' ')}
-          fill="transparent"
-          stroke={color}
-          strokeWidth={strokeWidth}
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
+        <>
+          {hasErasedMask && renderErasedFillMask(maskId, w, h, erasedFillStrokes)}
+          {fillColor && (
+            <rect
+              x={p}
+              y={p}
+              width={innerW}
+              height={innerH}
+              fill={fillColor}
+              stroke="none"
+              mask={maskAttr}
+            />
+          )}
+          <rect
+            x={p}
+            y={p}
+            width={innerW}
+            height={innerH}
+            fill="transparent"
+            stroke={color}
+            strokeWidth={strokeWidth}
+            vectorEffect="non-scaling-stroke"
+          />
+        </>
+      );
+
+    case 'rounded-rectangle': {
+      const rx = Math.min(16, innerW / 4, innerH / 4);
+      return (
+        <>
+          {hasErasedMask && renderErasedFillMask(maskId, w, h, erasedFillStrokes)}
+          {fillColor && (
+            <rect
+              x={p}
+              y={p}
+              width={innerW}
+              height={innerH}
+              rx={rx}
+              ry={rx}
+              fill={fillColor}
+              stroke="none"
+              mask={maskAttr}
+            />
+          )}
+          <rect
+            x={p}
+            y={p}
+            width={innerW}
+            height={innerH}
+            rx={rx}
+            ry={rx}
+            fill="transparent"
+            stroke={color}
+            strokeWidth={strokeWidth}
+            vectorEffect="non-scaling-stroke"
+          />
+        </>
+      );
+    }
+
+    case 'circle': {
+      const r = Math.max(2, Math.min(innerW, innerH) / 2);
+      return (
+        <>
+          {hasErasedMask && renderErasedFillMask(maskId, w, h, erasedFillStrokes)}
+          {fillColor && (
+            <circle
+              cx={w / 2}
+              cy={h / 2}
+              r={r}
+              fill={fillColor}
+              stroke="none"
+              mask={maskAttr}
+            />
+          )}
+          <circle
+            cx={w / 2}
+            cy={h / 2}
+            r={r}
+            fill="transparent"
+            stroke={color}
+            strokeWidth={strokeWidth}
+            vectorEffect="non-scaling-stroke"
+          />
+        </>
+      );
+    }
+
+    case 'ellipse': {
+      const rx = Math.max(2, innerW / 2);
+      const ry = Math.max(2, innerH / 2);
+      return (
+        <>
+          {hasErasedMask && renderErasedFillMask(maskId, w, h, erasedFillStrokes)}
+          {fillColor && (
+            <ellipse
+              cx={w / 2}
+              cy={h / 2}
+              rx={rx}
+              ry={ry}
+              fill={fillColor}
+              stroke="none"
+              mask={maskAttr}
+            />
+          )}
+          <ellipse
+            cx={w / 2}
+            cy={h / 2}
+            rx={rx}
+            ry={ry}
+            fill="transparent"
+            stroke={color}
+            strokeWidth={strokeWidth}
+            vectorEffect="non-scaling-stroke"
+          />
+        </>
+      );
+    }
+
+    case 'cube': {
+      // Oblique 3D cube with independent per-face fills and wireframe on top
+      const { fx, fy, fw, fh, ox, oy } = getCubeFacesGeometry(w, h, p);
+      const frontFill = faceFills?.front ?? fillColor;
+      const topFill = faceFills?.top ?? fillColor;
+      const rightFill = faceFills?.right ?? fillColor;
+      const topPts = `${fx},${fy} ${fx + ox},${fy - oy} ${fx + fw + ox},${fy - oy} ${fx + fw},${fy}`;
+      const rightPts = `${fx + fw},${fy} ${fx + fw + ox},${fy - oy} ${fx + fw + ox},${fy + fh - oy} ${fx + fw},${fy + fh}`;
+
+      return (
+        <>
+          {hasErasedMask && renderErasedFillMask(maskId, w, h, erasedFillStrokes)}
+          {(frontFill || topFill || rightFill) && (
+            <g mask={maskAttr} stroke="none">
+              {frontFill && <rect x={fx} y={fy} width={fw} height={fh} fill={frontFill} />}
+              {topFill && <polygon points={topPts} fill={topFill} />}
+              {rightFill && <polygon points={rightPts} fill={rightFill} />}
+            </g>
+          )}
+          <g
+            stroke={color}
+            strokeWidth={strokeWidth}
+            fill="transparent"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          >
+            {/* Front Face */}
+            <rect x={fx} y={fy} width={fw} height={fh} vectorEffect="non-scaling-stroke" />
+            {/* Top Face */}
+            <polygon points={topPts} vectorEffect="non-scaling-stroke" />
+            {/* Right Face */}
+            <polygon points={rightPts} vectorEffect="non-scaling-stroke" />
+          </g>
+        </>
+      );
+    }
+
+    case 'triangle':
+    case 'right-triangle':
+    case 'right-triangle-flipped':
+    case 'rhombus':
+    case 'trapezoid':
+    case 'parallelogram':
+    case 'pentagon':
+    case 'hexagon':
+    case 'star': {
+      const poly = getPolygonShapeVertices(type, w, h, p, innerW, innerH);
+      if (!poly) return null;
+      const pts = poly.map((pt) => `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(' ');
+      return (
+        <>
+          {hasErasedMask && renderErasedFillMask(maskId, w, h, erasedFillStrokes)}
+          {fillColor && (
+            <polygon points={pts} fill={fillColor} stroke="none" mask={maskAttr} />
+          )}
+          <polygon
+            points={pts}
+            fill="transparent"
+            stroke={color}
+            strokeWidth={strokeWidth}
+            strokeLinejoin="round"
+            vectorEffect="non-scaling-stroke"
+          />
+        </>
       );
     }
 
@@ -462,7 +718,11 @@ export const renderShapeSVG = (
   strokeWidth: number = 2.5,
   viewBoxWidth: number = 100,
   viewBoxHeight: number = 100,
-  zoom: number = 1
+  zoom: number = 1,
+  fillColor?: string,
+  faceFills?: Record<string, string>,
+  erasedFillStrokes?: ShapeErasedStroke[],
+  shapeId?: string
 ): React.ReactNode => {
   const vbW = Math.max(10, viewBoxWidth);
   const vbH = Math.max(10, viewBoxHeight);
@@ -476,7 +736,18 @@ export const renderShapeSVG = (
       preserveAspectRatio="none"
       className="w-full h-full overflow-visible"
     >
-      {renderShapeSvg(type, vbW, vbH, color, effectiveStrokeWidth, strokeWidth)}
+      {renderShapeSvg(
+        type,
+        vbW,
+        vbH,
+        color,
+        effectiveStrokeWidth,
+        strokeWidth,
+        fillColor,
+        faceFills,
+        erasedFillStrokes,
+        shapeId
+      )}
     </svg>
   );
 };

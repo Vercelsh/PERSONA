@@ -317,6 +317,11 @@ export default function App() {
                     onSave={handleSaveTask}
                     onDelete={handleDeleteTask}
                     onSelectTask={(id) => setSelectedTaskId(id)}
+                    onOpenBoard={(subjId, tskId) => {
+                      setBoardSubjectId(subjId);
+                      setBoardTaskId(tskId);
+                      setCurrentSection('board');
+                    }}
                   />
                 ) : selectedSubjectId && currentSubject ? (
                   <SubjectDetailView

@@ -11,6 +11,8 @@ interface BoardTextElementProps {
   viewportX: number;
   viewportY: number;
   isEraserActive?: boolean;
+  zIndex?: number;
+  editingZIndex?: number;
   onSelect: (e: React.PointerEvent) => void;
   onUpdateText: (updated: BoardTextObject, isFinal?: boolean) => void;
   onDelete: () => void;
@@ -27,6 +29,8 @@ export const BoardTextElement: React.FC<BoardTextElementProps> = ({
   viewportX,
   viewportY,
   isEraserActive = false,
+  zIndex,
+  editingZIndex,
   onSelect,
   onUpdateText,
   onDelete,
@@ -317,14 +321,14 @@ export const BoardTextElement: React.FC<BoardTextElementProps> = ({
       }
       className={`absolute select-none overflow-visible max-w-none ${
         isEraserActive
-          ? 'pointer-events-none z-0'
+          ? 'pointer-events-none'
           : isInGroup
-          ? 'cursor-move z-20'
+          ? 'cursor-move'
           : isSelected && !isCurrentlyEditing
-          ? 'ring-2 ring-black bg-black/[0.02] rounded-sm cursor-move shadow-[0_0_0_1px_rgba(255,255,255,0.7)] z-30'
+          ? 'ring-2 ring-black bg-black/[0.02] rounded-sm cursor-move shadow-[0_0_0_1px_rgba(255,255,255,0.7)]'
           : !isCurrentlyEditing
-          ? 'hover:ring-1 hover:ring-black/20 rounded cursor-pointer z-10'
-          : 'z-40'
+          ? 'hover:ring-1 hover:ring-black/20 rounded cursor-pointer'
+          : ''
       }`}
       style={{
         left: screenX,
@@ -333,6 +337,7 @@ export const BoardTextElement: React.FC<BoardTextElementProps> = ({
         minHeight: textObj.height ? `${textObj.height}px` : '38px',
         transform: `scale(${zoom}) rotate(${textObj.rotation || 0}deg)`,
         transformOrigin: 'top left',
+        zIndex: isCurrentlyEditing ? (editingZIndex ?? 40) : (zIndex ?? 10),
       }}
     >
       {/* Top-Right Delete Button for Selected Text (only when single selected) */}
