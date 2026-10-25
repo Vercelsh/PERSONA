@@ -32,11 +32,6 @@ function setupStores(db: IDBDatabase) {
     const boardStore = db.createObjectStore('board_states', { keyPath: 'taskId' });
     boardStore.createIndex('subjectId', 'subjectId', { unique: false });
   }
-
-  // Dedicated IDE projects store (keyed by taskId)
-  if (!db.objectStoreNames.contains('ide_projects')) {
-    db.createObjectStore('ide_projects', { keyPath: 'taskId' });
-  }
 }
 
 function attachConnectionLifecycleHandlers(db: IDBDatabase) {
@@ -79,7 +74,6 @@ export function getDB(): Promise<IDBDatabase> {
             'calendar_entries',
             'file_attachments',
             'board_states',
-            'ide_projects',
           ];
           const missingStores = neededStores.some((store) => !db.objectStoreNames.contains(store));
 
@@ -184,54 +178,70 @@ export async function deleteSubject(subjectId: string): Promise<void> {
   return new Promise((resolve, reject) => {
     try {
       const storeNames = ['subjects', 'tasks', 'calendar_entries', 'file_attachments', 'board_states'];
-      if (db.objectStoreNames.contains('ide_projects')) {
-        storeNames.push('ide_projects');
-      }
       const transaction = db.transaction(storeNames, 'readwrite');
       const subjectStore = transaction.objectStore('subjects');
       const taskStore = transaction.objectStore('tasks');
       const calendarStore = transaction.objectStore('calendar_entries');
       const fileStore = transaction.objectStore('file_attachments');
       const boardStore = transaction.objectStore('board_states');
-      const ideStore = db.objectStoreNames.contains('ide_projects')
-        ? transaction.objectStore('ide_projects')
-        : null;
 
       subjectStore.delete(subjectId);
 
-      // Delete associated tasks and their file attachments
-      const taskIndex = taskStore.index('subjectId');
-      const taskRequest = taskIndex.getAll(subjectId);
-      taskRequest.onsuccess = () => {
-        const tasks: TaskItem[] = taskRequest.result || [];
-        tasks.forEach((t) => {
-          deletedTaskIds.add(t.id);
-          latestBoardUpdatedAtByTask.delete(t.id);
-          boardSaveQueues.delete(t.id);
+      // Delete associated tasks, boards, and unreferenced file attachments
+      const allTasksReq = taskStore.getAll();
+      const allBoardsReq = boardStore.getAll();
+      allTasksReq.onsuccess = () => {
+        allBoardsReq.onsuccess = () => {
+          const allTasks: TaskItem[] = allTasksReq.result || [];
+          const allBoards: BoardState[] = allBoardsReq.result || [];
 
-          if (t.solutionAttachment?.fileId) {
-            fileStore.delete(t.solutionAttachment.fileId);
-          }
-          if (t.exampleAttachment?.fileId) {
-            fileStore.delete(t.exampleAttachment.fileId);
-          }
-          const boardGetReq = boardStore.get(t.id);
-          boardGetReq.onsuccess = () => {
-            const bState: BoardState | undefined = boardGetReq.result;
-            if (bState?.images) {
-              bState.images.forEach((img) => {
-                if (img.fileId && img.fileId !== t.exampleAttachment?.fileId && img.fileId !== t.solutionAttachment?.fileId) {
-                  fileStore.delete(img.fileId);
-                }
-              });
+          const subjectTasks = allTasks.filter((t) => t.subjectId === subjectId);
+          const subjectTaskIds = new Set(subjectTasks.map((t) => t.id));
+          const candidateFileIds = new Set<string>();
+
+          subjectTasks.forEach((t) => {
+            deletedTaskIds.add(t.id);
+            latestBoardUpdatedAtByTask.delete(t.id);
+            boardSaveQueues.delete(t.id);
+
+            if (t.solutionAttachment?.fileId) {
+              candidateFileIds.add(t.solutionAttachment.fileId);
             }
-            boardStore.delete(t.id);
-          };
-          if (ideStore) {
-            ideStore.delete(t.id);
-          }
-          taskStore.delete(t.id);
-        });
+            if (t.exampleAttachment?.fileId) {
+              candidateFileIds.add(t.exampleAttachment.fileId);
+            }
+            taskStore.delete(t.id);
+          });
+
+          allBoards.forEach((b) => {
+            if (b.subjectId === subjectId || subjectTaskIds.has(b.taskId)) {
+              deletedTaskIds.add(b.taskId);
+              latestBoardUpdatedAtByTask.delete(b.taskId);
+              boardSaveQueues.delete(b.taskId);
+              b.images?.forEach((img) => {
+                if (img.fileId) candidateFileIds.add(img.fileId);
+              });
+              boardStore.delete(b.taskId);
+            }
+          });
+
+          const remainingTasks = allTasks.filter((t) => t.subjectId !== subjectId);
+          const remainingBoards = allBoards.filter(
+            (b) => b.subjectId !== subjectId && !subjectTaskIds.has(b.taskId)
+          );
+
+          candidateFileIds.forEach((fid) => {
+            const stillUsedInTask = remainingTasks.some(
+              (t) => t.exampleAttachment?.fileId === fid || t.solutionAttachment?.fileId === fid
+            );
+            const stillUsedInBoard = remainingBoards.some((b) =>
+              b.images?.some((img) => img.fileId === fid)
+            );
+            if (!stillUsedInTask && !stillUsedInBoard) {
+              fileStore.delete(fid);
+            }
+          });
+        };
       };
 
       // Also clean calendar entries referencing this subject
@@ -320,42 +330,50 @@ export async function deleteTask(taskId: string): Promise<void> {
   return new Promise((resolve, reject) => {
     try {
       const storeNames = ['tasks', 'file_attachments', 'board_states'];
-      if (db.objectStoreNames.contains('ide_projects')) {
-        storeNames.push('ide_projects');
-      }
       const transaction = db.transaction(storeNames, 'readwrite');
       const taskStore = transaction.objectStore('tasks');
       const fileStore = transaction.objectStore('file_attachments');
       const boardStore = transaction.objectStore('board_states');
-      const ideStore = db.objectStoreNames.contains('ide_projects')
-        ? transaction.objectStore('ide_projects')
-        : null;
 
-      const getReq = taskStore.get(taskId);
-      getReq.onsuccess = () => {
-        const existing: TaskItem | undefined = getReq.result;
-        if (existing?.solutionAttachment?.fileId) {
-          fileStore.delete(existing.solutionAttachment.fileId);
-        }
-        if (existing?.exampleAttachment?.fileId) {
-          fileStore.delete(existing.exampleAttachment.fileId);
-        }
-        const boardGetReq = boardStore.get(taskId);
-        boardGetReq.onsuccess = () => {
-          const bState: BoardState | undefined = boardGetReq.result;
-          if (bState?.images) {
-            bState.images.forEach((img) => {
-              if (img.fileId && img.fileId !== existing?.exampleAttachment?.fileId && img.fileId !== existing?.solutionAttachment?.fileId) {
-                fileStore.delete(img.fileId);
-              }
-            });
+      const allTasksReq = taskStore.getAll();
+      const allBoardsReq = boardStore.getAll();
+      allTasksReq.onsuccess = () => {
+        allBoardsReq.onsuccess = () => {
+          const allTasks: TaskItem[] = allTasksReq.result || [];
+          const allBoards: BoardState[] = allBoardsReq.result || [];
+
+          const existing = allTasks.find((t) => t.id === taskId);
+          const bState = allBoards.find((b) => b.taskId === taskId);
+
+          const candidateFileIds = new Set<string>();
+          if (existing?.solutionAttachment?.fileId) {
+            candidateFileIds.add(existing.solutionAttachment.fileId);
           }
+          if (existing?.exampleAttachment?.fileId) {
+            candidateFileIds.add(existing.exampleAttachment.fileId);
+          }
+          bState?.images?.forEach((img) => {
+            if (img.fileId) candidateFileIds.add(img.fileId);
+          });
+
           boardStore.delete(taskId);
+          taskStore.delete(taskId);
+
+          const remainingTasks = allTasks.filter((t) => t.id !== taskId);
+          const remainingBoards = allBoards.filter((b) => b.taskId !== taskId);
+
+          candidateFileIds.forEach((fid) => {
+            const stillUsedInTask = remainingTasks.some(
+              (t) => t.exampleAttachment?.fileId === fid || t.solutionAttachment?.fileId === fid
+            );
+            const stillUsedInBoard = remainingBoards.some((b) =>
+              b.images?.some((img) => img.fileId === fid)
+            );
+            if (!stillUsedInTask && !stillUsedInBoard) {
+              fileStore.delete(fid);
+            }
+          });
         };
-        if (ideStore) {
-          ideStore.delete(taskId);
-        }
-        taskStore.delete(taskId);
       };
 
       transaction.oncomplete = () => resolve();
@@ -419,20 +437,30 @@ export async function deleteFileAttachment(fileId: string): Promise<void> {
   const db = await getDB();
   return new Promise((resolve, reject) => {
     try {
-      const transaction = db.transaction(['file_attachments', 'board_states'], 'readwrite');
+      const transaction = db.transaction(['file_attachments', 'board_states', 'tasks'], 'readwrite');
       const fileStore = transaction.objectStore('file_attachments');
       const boardStore = transaction.objectStore('board_states');
+      const taskStore = transaction.objectStore('tasks');
 
-      // Do not delete the underlying Blob if any saved board still references this fileId
+      // Do not delete the underlying Blob if any saved board or task still references this fileId
       const boardsReq = boardStore.getAll();
+      const tasksReq = taskStore.getAll();
       boardsReq.onsuccess = () => {
-        const boards: BoardState[] = boardsReq.result || [];
-        const usedOnBoard = boards.some((b) =>
-          b.images?.some((img) => img.fileId === fileId)
-        );
-        if (!usedOnBoard) {
-          fileStore.delete(fileId);
-        }
+        tasksReq.onsuccess = () => {
+          const boards: BoardState[] = boardsReq.result || [];
+          const tasks: TaskItem[] = tasksReq.result || [];
+          const usedOnBoard = boards.some((b) =>
+            b.images?.some((img) => img.fileId === fileId)
+          );
+          const usedInTask = tasks.some(
+            (t) =>
+              t.exampleAttachment?.fileId === fileId ||
+              t.solutionAttachment?.fileId === fileId
+          );
+          if (!usedOnBoard && !usedInTask) {
+            fileStore.delete(fileId);
+          }
+        };
       };
 
       transaction.oncomplete = () => resolve();
@@ -509,6 +537,10 @@ export async function saveBoardState(state: BoardState): Promise<void> {
       }
 
       const db = await getDB();
+      if (deletedTaskIds.has(taskId) || incomingTs < (latestBoardUpdatedAtByTask.get(taskId) ?? 0)) {
+        return;
+      }
+
       await new Promise<void>((resolve, reject) => {
         try {
           const transaction = db.transaction('board_states', 'readwrite');
@@ -516,7 +548,9 @@ export async function saveBoardState(state: BoardState): Promise<void> {
           const getReq = store.get(taskId);
 
           getReq.onsuccess = () => {
-            if (deletedTaskIds.has(taskId)) return;
+            if (deletedTaskIds.has(taskId) || incomingTs < (latestBoardUpdatedAtByTask.get(taskId) ?? 0)) {
+              return;
+            }
             const existing: BoardState | undefined = getReq.result;
             if (
               existing &&
@@ -541,6 +575,11 @@ export async function saveBoardState(state: BoardState): Promise<void> {
           reject(err);
         }
       });
+    })
+    .finally(() => {
+      if (boardSaveQueues.get(taskId) === nextSave) {
+        boardSaveQueues.delete(taskId);
+      }
     });
 
   boardSaveQueues.set(taskId, nextSave);
@@ -548,22 +587,36 @@ export async function saveBoardState(state: BoardState): Promise<void> {
 }
 
 export async function deleteBoardState(taskId: string): Promise<void> {
-  latestBoardUpdatedAtByTask.delete(taskId);
-  boardSaveQueues.delete(taskId);
+  const cutoffTs = Math.max(Date.now(), (latestBoardUpdatedAtByTask.get(taskId) ?? 0) + 1);
+  latestBoardUpdatedAtByTask.set(taskId, cutoffTs);
 
-  const db = await getDB();
-  return new Promise((resolve, reject) => {
-    try {
-      const transaction = db.transaction('board_states', 'readwrite');
-      const store = transaction.objectStore('board_states');
-      store.delete(taskId);
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-      transaction.onabort = () => reject(transaction.error || new Error('Транзакция удаления доски прервана'));
-    } catch (err) {
-      reject(err);
-    }
-  });
+  const previousOp = boardSaveQueues.get(taskId) ?? Promise.resolve();
+  const deleteOp = previousOp
+    .catch(() => {})
+    .then(async () => {
+      const db = await getDB();
+      await new Promise<void>((resolve, reject) => {
+        try {
+          const transaction = db.transaction('board_states', 'readwrite');
+          const store = transaction.objectStore('board_states');
+          store.delete(taskId);
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () =>
+            reject(transaction.error || new Error('Транзакция удаления доски прервана'));
+        } catch (err) {
+          reject(err);
+        }
+      });
+    })
+    .finally(() => {
+      if (boardSaveQueues.get(taskId) === deleteOp) {
+        boardSaveQueues.delete(taskId);
+      }
+    });
+
+  boardSaveQueues.set(taskId, deleteOp);
+  return deleteOp;
 }
 
 // ------------------- CALENDAR ENTRIES -------------------
@@ -625,5 +678,5 @@ export async function deleteCalendarEntry(entryId: string): Promise<void> {
 // ------------------- INITIAL SEEDING -------------------
 
 export async function initializeDatabaseIfEmpty(): Promise<void> {
-  return Promise.resolve();
+  await getDB();
 }

@@ -92,8 +92,13 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     templateAttachment,
   };
 
+  const isMountedRef = useRef(true);
+  const exampleLoadSeqRef = useRef(0);
+  const templateLoadSeqRef = useRef(0);
+
   // Helper to load example Data URL
   const loadExampleBlob = useCallback(async (att: SolutionAttachment | null) => {
+    const seq = ++exampleLoadSeqRef.current;
     if (!att) {
       setExampleUrl(null);
       return;
@@ -107,10 +112,13 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     if (att.fileId) {
       try {
         const stored = await getFileAttachment(att.fileId);
+        if (!isMountedRef.current || seq !== exampleLoadSeqRef.current) return;
         if (stored && stored.blob) {
           const reader = new FileReader();
           reader.onload = () => {
-            setExampleUrl(reader.result as string);
+            if (isMountedRef.current && seq === exampleLoadSeqRef.current) {
+              setExampleUrl(reader.result as string);
+            }
           };
           reader.readAsDataURL(stored.blob);
           return;
@@ -119,11 +127,14 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
         console.warn('Не удалось загрузить фото примера:', err);
       }
     }
-    setExampleUrl(null);
+    if (isMountedRef.current && seq === exampleLoadSeqRef.current) {
+      setExampleUrl(null);
+    }
   }, []);
 
   // Helper to load template Data URL
   const loadTemplateBlob = useCallback(async (att: SolutionAttachment | null) => {
+    const seq = ++templateLoadSeqRef.current;
     if (!att) {
       setTemplateUrl(null);
       return;
@@ -137,10 +148,13 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     if (att.fileId) {
       try {
         const stored = await getFileAttachment(att.fileId);
+        if (!isMountedRef.current || seq !== templateLoadSeqRef.current) return;
         if (stored && stored.blob) {
           const reader = new FileReader();
           reader.onload = () => {
-            setTemplateUrl(reader.result as string);
+            if (isMountedRef.current && seq === templateLoadSeqRef.current) {
+              setTemplateUrl(reader.result as string);
+            }
           };
           reader.readAsDataURL(stored.blob);
           return;
@@ -149,7 +163,9 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
         console.warn('Не удалось загрузить фото шаблона:', err);
       }
     }
-    setTemplateUrl(null);
+    if (isMountedRef.current && seq === templateLoadSeqRef.current) {
+      setTemplateUrl(null);
+    }
   }, []);
 
   // Flush pending changes
@@ -207,6 +223,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
 
   // Cleanup on unmount
   useEffect(() => {
+    isMountedRef.current = true;
     const handleBeforeUnload = () => {
       void flushSave();
     };
@@ -215,6 +232,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     window.addEventListener('pagehide', handleBeforeUnload);
 
     return () => {
+      isMountedRef.current = false;
       window.removeEventListener('beforeunload', handleBeforeUnload);
       window.removeEventListener('pagehide', handleBeforeUnload);
       if (saveTimeoutRef.current) {
@@ -288,6 +306,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
       setExampleAttachment(newAtt);
       setExampleUrl(dataUrl);
       triggerAutoSave(title, notes, solutionText, newAtt, templateAttachment);
+      await flushSave();
 
       if (prevFileId && prevFileId !== fileId) {
         await deleteFileAttachment(prevFileId).catch(() => {});
@@ -307,6 +326,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     setExampleAttachment(null);
     setExampleUrl(null);
     triggerAutoSave(title, notes, solutionText, null, templateAttachment);
+    await flushSave();
     if (prevFileId) {
       await deleteFileAttachment(prevFileId).catch(() => {});
     }
@@ -335,6 +355,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
       setTemplateAttachment(newAtt);
       setTemplateUrl(dataUrl);
       triggerAutoSave(title, notes, solutionText, exampleAttachment, newAtt);
+      await flushSave();
 
       if (prevFileId && prevFileId !== fileId) {
         await deleteFileAttachment(prevFileId).catch(() => {});
@@ -354,6 +375,7 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
     setTemplateAttachment(null);
     setTemplateUrl(null);
     triggerAutoSave(title, notes, solutionText, exampleAttachment, null);
+    await flushSave();
     if (prevFileId) {
       await deleteFileAttachment(prevFileId).catch(() => {});
     }
@@ -725,6 +747,11 @@ export const TaskDetailView: React.FC<TaskDetailViewProps> = ({
               <button
                 onClick={async () => {
                   setShowDeleteConfirm(false);
+                  if (saveTimeoutRef.current) {
+                    clearTimeout(saveTimeoutRef.current);
+                    saveTimeoutRef.current = null;
+                  }
+                  hasPendingChangesRef.current = false;
                   await onDelete(task.id);
                   onBack();
                 }}

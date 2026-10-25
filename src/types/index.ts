@@ -179,5 +179,3 @@ export interface BoardState {
   updatedAt: number;
 }
 
-export * from './ide';
-

@@ -690,6 +690,8 @@ export const BoardControls: React.FC<BoardControlsProps> = ({
         if (ev.shiftKey) {
           newRotation = Math.round(newRotation / 15) * 15;
         }
+        while (newRotation > 180) newRotation -= 360;
+        while (newRotation <= -180) newRotation += 360;
 
         onUpdateImage(
           {

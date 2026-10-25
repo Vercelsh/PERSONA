@@ -23,9 +23,9 @@ export const BoardTaskPicker: React.FC<BoardTaskPickerProps> = ({
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
     return (
-      t.title.toLowerCase().includes(q) ||
-      t.taskNumber.toString().includes(q) ||
-      t.notes.toLowerCase().includes(q)
+      (t.title || '').toLowerCase().includes(q) ||
+      String(t.taskNumber ?? '').includes(q) ||
+      (t.notes || '').toLowerCase().includes(q)
     );
   });
 

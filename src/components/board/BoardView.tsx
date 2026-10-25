@@ -1187,7 +1187,14 @@ export const BoardView: React.FC<BoardViewProps> = ({
       } else if (item.type === 'image') {
         const img = imgMap.get(item.id);
         if (img) {
-          if (x >= img.x && x <= img.x + img.width && y >= img.y && y <= img.y + img.height) {
+          const cx = img.x + img.width / 2;
+          const cy = img.y + img.height / 2;
+          const rad = -((img.rotation || 0) * Math.PI) / 180;
+          const cos = Math.cos(rad);
+          const sin = Math.sin(rad);
+          const localX = cx + (x - cx) * cos - (y - cy) * sin;
+          const localY = cy + (x - cx) * sin + (y - cy) * cos;
+          if (localX >= img.x && localX <= img.x + img.width && localY >= img.y && localY <= img.y + img.height) {
             return { type: 'image', id: img.id };
           }
         }
@@ -1298,7 +1305,7 @@ export const BoardView: React.FC<BoardViewProps> = ({
       const dx = (ev.clientX - startClientX) / viewport.zoom;
       const dy = (ev.clientY - startClientY) / viewport.zoom;
 
-      if (Math.hypot(dx, dy) > 1.5) {
+      if (Math.hypot(ev.clientX - startClientX, ev.clientY - startClientY) > 1.5 || Math.hypot(dx, dy) > 1.5) {
         hasMoved = true;
       }
 
@@ -2236,8 +2243,8 @@ export const BoardView: React.FC<BoardViewProps> = ({
         if (!txt) continue;
         const lines = txt.text.split('\n');
         const maxLineLen = lines.reduce((max, l) => Math.max(max, l.length), 0);
-        const estW = Math.max(60, maxLineLen * (txt.fontSize * 0.65) + 24);
-        const estH = Math.max(28, lines.length * (txt.fontSize * 1.3) + 16);
+        const estW = txt.width || Math.max(60, maxLineLen * (txt.fontSize * 0.65) + 24);
+        const estH = txt.height || Math.max(28, lines.length * (txt.fontSize * 1.3) + 16);
         const pad = 10;
         if (x >= txt.x - pad && x <= txt.x + estW + pad && y >= txt.y - pad && y <= txt.y + estH + pad) {
           const nextTexts = textsRef.current.filter((t) => t.id !== txt.id);
@@ -2281,7 +2288,19 @@ export const BoardView: React.FC<BoardViewProps> = ({
         const img = imgMap.get(item.id);
         if (!img) continue;
         const pad = 10;
-        if (x >= img.x - pad && x <= img.x + img.width + pad && y >= img.y - pad && y <= img.y + img.height + pad) {
+        const cx = img.x + img.width / 2;
+        const cy = img.y + img.height / 2;
+        const rad = -((img.rotation || 0) * Math.PI) / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        const localX = cx + (x - cx) * cos - (y - cy) * sin;
+        const localY = cy + (x - cx) * sin + (y - cy) * cos;
+        if (
+          localX >= img.x - pad &&
+          localX <= img.x + img.width + pad &&
+          localY >= img.y - pad &&
+          localY <= img.y + img.height + pad
+        ) {
           const nextImages = imagesRef.current.filter((im) => im.id !== img.id);
           imagesRef.current = nextImages;
           setImages(nextImages);
@@ -2740,6 +2759,9 @@ export const BoardView: React.FC<BoardViewProps> = ({
         setImages(nextImages);
         setSelectedItems([{ type: 'image', id: newImage.id }]);
         pushHistory(strokesRef.current, textsRef.current, nextImages, shapesRef.current);
+        URL.revokeObjectURL(objectUrl);
+      };
+      img.onerror = () => {
         URL.revokeObjectURL(objectUrl);
       };
 

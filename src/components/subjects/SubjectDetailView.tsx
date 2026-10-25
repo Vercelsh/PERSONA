@@ -33,11 +33,11 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
     return (
-      t.title.toLowerCase().includes(q) ||
-      t.taskNumber.toString().includes(q) ||
-      t.notes.toLowerCase().includes(q) ||
-      t.example.toLowerCase().includes(q) ||
-      (t.solutionText && t.solutionText.toLowerCase().includes(q))
+      (t.title || '').toLowerCase().includes(q) ||
+      String(t.taskNumber ?? '').includes(q) ||
+      (t.notes || '').toLowerCase().includes(q) ||
+      (t.example || '').toLowerCase().includes(q) ||
+      (t.solutionText || '').toLowerCase().includes(q)
     );
   });
 
@@ -186,7 +186,12 @@ export const SubjectDetailView: React.FC<SubjectDetailViewProps> = ({
               {searchQuery ? 'Заданий по запросу не найдено' : 'В этом предмете пока нет заданий'}
             </p>
             <button
-              onClick={() => setIsAddingTask(true)}
+              onClick={() => {
+                const maxNum = tasks.reduce((max, t) => Math.max(max, t.taskNumber || 0), 0);
+                setNewTaskNumber(maxNum + 1);
+                setNewTaskTitle(`Задание ${maxNum + 1}`);
+                setIsAddingTask(true);
+              }}
               className="mt-4 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-neutral-300 hover:text-white rounded border border-white/[0.1] hover:border-white/[0.2] transition-colors"
             >
               <Plus className="w-3.5 h-3.5" />

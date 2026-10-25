@@ -181,7 +181,8 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   // Open form for editing
   const handleOpenEdit = (entry: CalendarEntry) => {
     setEditingEntryId(entry.id);
-    setFormSubjectId(entry.subjectId);
+    const hasSubject = subjects.some((s) => s.id === entry.subjectId);
+    setFormSubjectId(hasSubject ? entry.subjectId : subjects[0]?.id || '');
     setFormHours(entry.durationHours);
     setFormMinutes(entry.durationMinutes);
     setFormTasks(entry.taskNumbers);
@@ -547,7 +548,9 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                       min="0"
                       max="24"
                       value={formHours}
-                      onChange={(e) => setFormHours(Math.max(0, parseInt(e.target.value) || 0))}
+                      onChange={(e) =>
+                        setFormHours(Math.min(24, Math.max(0, parseInt(e.target.value) || 0)))
+                      }
                       className="w-full bg-transparent text-white text-sm focus:outline-none font-mono"
                     />
                     <span className="text-xs text-neutral-500 font-mono">часов</span>
@@ -559,7 +562,9 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
                       min="0"
                       max="59"
                       value={formMinutes}
-                      onChange={(e) => setFormMinutes(Math.max(0, parseInt(e.target.value) || 0))}
+                      onChange={(e) =>
+                        setFormMinutes(Math.min(59, Math.max(0, parseInt(e.target.value) || 0)))
+                      }
                       className="w-full bg-transparent text-white text-sm focus:outline-none font-mono"
                     />
                     <span className="text-xs text-neutral-500 font-mono">минут</span>
