@@ -7,3 +7,6 @@ coverage/
 .env*
 src-tauri/target/
 persona-desktop-project.tar.gz
+
+# Temporary Google AI Studio media artifacts
+.aistudio/artifacts/**/.tempmediaStorage/
