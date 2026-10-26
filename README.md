@@ -23,11 +23,11 @@ Persona помогает организовать самостоятельную
 
 ## Технологии
 
-- [Tauri v2](https://v2.tauri.app/) — оболочка Windows-приложения
+- [Tauri v2](https://v2.tauri.app/) - оболочка Windows-приложения
 - [React 19](https://react.dev/) и [TypeScript](https://www.typescriptlang.org/)
-- [Vite](https://vite.dev/) — сборка интерфейса
+- [Vite](https://vite.dev/) - сборка интерфейса
 - [Tailwind CSS v4](https://tailwindcss.com/)
-- IndexedDB — локальное хранилище учебных данных
+- IndexedDB - локальное хранилище учебных данных
 
 ## Сборка из исходного кода
 
