@@ -63,11 +63,3 @@ npm run desktop:build
 ```
 
 Готовый установщик NSIS обычно находится в `src-tauri/target/release/bundle/nsis/`.
-
-## Публикация релиза
-
-Workflow **Build Windows App (.exe)** запускается вручную через вкладку **Actions**. Он проверяет TypeScript, собирает приложение и публикует установщик Windows в [GitHub Releases](https://github.com/Vercelsh/PERSONA/releases). Номер релиза берётся из поля `version` файла `src-tauri/tauri.conf.json`. Перед выпуском следующей версии синхронно обновите версию в `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` и `package.json`, отправьте изменения в `main` и запустите workflow.
-
-## Лицензия
-
-Лицензия проекта пока не указана. Если вы хотите разрешить другим людям свободно использовать, изменять и распространять код, добавьте файл лицензии с выбранными условиями.
